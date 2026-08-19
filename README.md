@@ -216,6 +216,44 @@ saved connections or preferences.
 
 ---
 
+## Releases and versioning
+
+Versions follow [semver](https://semver.org), read from the user's point of view:
+**major** for a backup format older versions cannot read or a workflow removed,
+**minor** for new capability, **patch** for fixes that change nothing you relied
+on. Every release is written up in [CHANGELOG.md](CHANGELOG.md).
+
+Bump the version, which also commits and tags:
+
+```bash
+npm version patch
+```
+
+Then cut the release:
+
+```bash
+npm run release
+```
+
+That runs preflight checks (clean tree, tag free, changelog entry present), the
+full test suite, and the Windows build; then tags, pushes, and publishes a GitHub
+release with both executables attached and the changelog section as its notes.
+
+Check what it would do without changing anything:
+
+```bash
+npm run release -- --dry-run
+```
+
+The GitHub step uses the [`gh` CLI](https://cli.github.com). Without it the local
+steps still run and the manual instructions are printed instead — install it once
+with `winget install GitHub.cli` to automate the last step.
+
+The executables are not committed: at 94 MB each they belong on a release, not in
+git history. `release/` is ignored for that reason.
+
+---
+
 ## Troubleshooting
 
 ### `querySrv ECONNREFUSED` / `querySrv ETIMEOUT` on an Atlas URI

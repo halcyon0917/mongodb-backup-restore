@@ -16,7 +16,8 @@
     "test:e2e": "electron scripts/ui-e2e.js",
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",
-    "icon": "electron scripts/make-icon.js"
+    "icon": "electron scripts/make-icon.js",
+    "release": "node scripts/release.js"
   },
   "build": {
     "appId": "com.adriandelacruz.mongodb-backup-restore",
