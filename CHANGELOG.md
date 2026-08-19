@@ -17,28 +17,6 @@ from the user's point of view:
 
 Nothing yet.
 
-## [1.0.1] — 2026-08-19
-
-Release tooling only. No application code changed — `src/` is identical to 1.0.0,
-so the only difference in the build is the version number it reports. If you are
-already running 1.0.0 there is nothing here for you.
-
-### Added
-
-- `npm run release -- --publish-only` publishes the GitHub release for a tag that
-  has already been pushed. Without it, a release interrupted after tagging could
-  not be retried: the "tag already exists" check rejected every attempt, and the
-  only way forward was deleting and re-pushing a tag other people might already
-  have pulled.
-
-### Fixed
-
-- The release script no longer refuses to run when `npm version` has already
-  created the tag. An existing tag is accepted when it points at the commit being
-  released, and rejected only when it points somewhere else. The documented flow
-  (`npm version patch` then `npm run release`) previously deadlocked on its own
-  guard.
-
 ## [1.0.0] — 2026-08-19
 
 First release.
@@ -85,6 +63,5 @@ First release.
 - One database per run; whole-cluster backup is not implemented.
 - The executables are unsigned, so Windows SmartScreen warns on first run.
 
-[Unreleased]: https://github.com/halcyon0917/mongodb-backup-restore/compare/v1.0.1...HEAD
-[1.0.1]: https://github.com/halcyon0917/mongodb-backup-restore/compare/v1.0.0...v1.0.1
+[Unreleased]: https://github.com/halcyon0917/mongodb-backup-restore/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/halcyon0917/mongodb-backup-restore/releases/tag/v1.0.0
