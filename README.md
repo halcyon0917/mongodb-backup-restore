@@ -14,6 +14,28 @@ dumps produced by those tools can be restored here.
 Works with local servers, replica sets, sharded clusters, and MongoDB Atlas
 (`mongodb://` and `mongodb+srv://`).
 
+![Backing up a database, with per-collection progress and an activity log](docs/screenshots/backup.png)
+
+---
+
+## Screenshots
+
+**Restoring** — the tab carries its own colour and states the direction of travel,
+because running a restore while believing you are running a backup is the one
+mistake worth designing against. Four modes decide what happens to existing data;
+the two that delete turn the button red and confirm against the target name.
+
+![The restore tab, showing the four modes for existing data](docs/screenshots/restore.png)
+
+**Picking a database** — type to filter. Opening the list always shows every
+database with the current one ticked, so a chosen name never hides the rest.
+
+![The database picker, filtered by typing](docs/screenshots/database-picker.png)
+
+**Light theme**, following the Windows setting.
+
+![The same screen in the light theme](docs/screenshots/light-theme.png)
+
 ---
 
 ## Running it
