@@ -1,0 +1,24 @@
+node_modules/
+release/
+dist/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local backup output / test scratch
+backups/
+tmp/
+
+# Never publish credentials or local app state
+.env
+.env.*
+settings.json
+*.pem
+*.key
+*.pfx
+
+# Never publish database contents
+*.bson
+*.bson.gz
+backup-manifest.json
+*.metadata.json

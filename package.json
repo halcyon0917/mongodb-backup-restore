@@ -1,0 +1,68 @@
+{
+  "name": "mongodb-backup-restore",
+  "version": "1.0.0",
+  "description": "Windows desktop app for backing up and restoring MongoDB databases",
+  "main": "src/main/main.js",
+  "author": "Adrian Dela Cruz",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "npm run test:engines && npm run test:srv && npm run test:compat && npm run test:ui && npm run test:e2e",
+    "test:engines": "node scripts/smoke-test.js",
+    "test:srv": "node scripts/srv-test.js",
+    "test:compat": "node scripts/compat-test.js",
+    "test:ui": "electron scripts/ui-check.js",
+    "test:e2e": "electron scripts/ui-e2e.js",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable",
+    "icon": "electron scripts/make-icon.js"
+  },
+  "build": {
+    "appId": "com.adriandelacruz.mongodb-backup-restore",
+    "productName": "MongoDB Backup and Restore",
+    "publish": null,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "MongoDB Backup and Restore"
+    },
+    "portable": {
+      "artifactName": "MongoDB-Backup-Restore-${version}-portable.exe"
+    }
+  },
+  "dependencies": {
+    "bson": "^7.3.2",
+    "mongodb": "^7.5.0"
+  },
+  "devDependencies": {
+    "electron": "^41.7.1",
+    "electron-builder": "^26.15.3"
+  }
+}

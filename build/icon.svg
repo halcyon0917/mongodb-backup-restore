@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!--
+    App icon: the MongoDB leaf from the window's brand mark, framed by a
+    backup/restore cycle — the right arc flows down (back up), the left arc
+    flows up (restore).
+
+    Geometry notes, so this stays editable:
+      centre (128,128), arc radius 92
+      right arc  theta -58deg -> 44deg,  arrowhead at 52deg  (rotate 142)
+      left arc   theta 122deg -> 224deg, arrowhead at 232deg (rotate -38)
+    Each arrowhead extends 9 units behind its tip so its base hides the
+    stroke's round cap instead of kinking against it.
+
+    Drawn on a dark tile rather than as a bare silhouette so it stays legible on
+    both light and dark taskbars. See icon-small.svg for the <=32px cut, which
+    drops the arcs because they turn to mush at that size.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a2231" />
+      <stop offset="1" stop-color="#0a0e14" />
+    </linearGradient>
+    <linearGradient id="leaf" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#6bebab" />
+      <stop offset="1" stop-color="#0f9c4a" />
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="52" fill="url(#tile)" />
+  <rect
+    x="1.5"
+    y="1.5"
+    width="253"
+    height="253"
+    rx="50.5"
+    fill="none"
+    stroke="#ffffff"
+    stroke-opacity="0.11"
+    stroke-width="3"
+  />
+
+  <!-- Backup / restore cycle, clockwise: down on the right, up on the left. -->
+  <g fill="none" stroke="#dae3f0" stroke-width="12" stroke-linecap="round" stroke-opacity="0.9">
+    <path d="M176.75 49.98 A92 92 0 0 1 194.18 191.91" />
+    <path d="M79.25 206.02 A92 92 0 0 1 61.82 64.09" />
+  </g>
+  <g fill="#dae3f0" fill-opacity="0.9">
+    <path d="M-9 -13 L23 0 L-9 13 Z" transform="translate(184.64 200.50) rotate(142)" />
+    <path d="M-9 -13 L23 0 L-9 13 Z" transform="translate(71.36 55.50) rotate(-38)" />
+  </g>
+
+  <!-- The leaf is the identity, so it holds the centre at full size. -->
+  <g transform="translate(44 44) scale(7)">
+    <path d="M12 2c2.6 3.2 4.4 6.4 4.4 9.7 0 3.6-2 6.6-4.4 8.3V2Z" fill="url(#leaf)" />
+    <path
+      d="M12 2C9.4 5.2 7.6 8.4 7.6 11.7c0 3.6 2 6.6 4.4 8.3V2Z"
+      fill="url(#leaf)"
+      opacity="0.55"
+    />
+    <rect x="11.4" y="19" width="1.2" height="3" rx="0.6" fill="url(#leaf)" opacity="0.8" />
+  </g>
+</svg>

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!--
+    The <=32px cut of icon.svg. At 16px the cycle arcs collapse into grey fuzz
+    around the leaf, so they are dropped and the leaf is scaled up instead —
+    a recognisable silhouette beats unreadable detail at taskbar size.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a2231" />
+      <stop offset="1" stop-color="#0a0e14" />
+    </linearGradient>
+    <linearGradient id="leaf" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#61e2a2" />
+      <stop offset="1" stop-color="#11a24e" />
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="52" fill="url(#tile)" />
+  <rect
+    x="1.5"
+    y="1.5"
+    width="253"
+    height="253"
+    rx="50.5"
+    fill="none"
+    stroke="#ffffff"
+    stroke-opacity="0.11"
+    stroke-width="3"
+  />
+
+  <g transform="translate(38 38) scale(7.5)">
+    <path d="M12 2c2.6 3.2 4.4 6.4 4.4 9.7 0 3.6-2 6.6-4.4 8.3V2Z" fill="url(#leaf)" />
+    <path
+      d="M12 2C9.4 5.2 7.6 8.4 7.6 11.7c0 3.6 2 6.6 4.4 8.3V2Z"
+      fill="url(#leaf)"
+      opacity="0.55"
+    />
+    <rect x="11.4" y="19" width="1.2" height="3" rx="0.6" fill="url(#leaf)" opacity="0.8" />
+  </g>
+</svg>
