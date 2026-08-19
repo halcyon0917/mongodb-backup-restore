@@ -151,9 +151,17 @@ if (PUBLISH_ONLY) {
     tagAlreadyAtHead = true;
     console.log(`  ok    tag ${TAG} already exists at HEAD — it will just be pushed`);
   } else {
+    // Whether moving the tag is safe depends entirely on whether anyone else
+    // could already have it, so say which case this is rather than leaving the
+    // choice to guesswork.
+    const short = (tagCommit || '?').slice(0, 7);
+    const pushed = tryGit('ls-remote', '--tags', 'origin', `refs/tags/${TAG}`);
     problems.push(
-      `tag ${TAG} exists but points at ${(tagCommit || '?').slice(0, 7)} rather than HEAD — ` +
-        'move it, or bump the version with "npm version <patch|minor|major>"'
+      pushed
+        ? `tag ${TAG} points at ${short} rather than HEAD, and is already on the remote — ` +
+            'bump the version instead; moving a published tag breaks anyone who has it'
+        : `tag ${TAG} points at ${short} rather than HEAD and has not been pushed, so it is ` +
+            `safe to drop and let this script recreate it:  git tag -d ${TAG}`
     );
   }
 } else {

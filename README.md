@@ -223,7 +223,8 @@ Versions follow [semver](https://semver.org), read from the user's point of view
 **minor** for new capability, **patch** for fixes that change nothing you relied
 on. Every release is written up in [CHANGELOG.md](CHANGELOG.md).
 
-Bump the version, which also commits and tags:
+Write the changelog entry for the new version first, so the tag ends up
+containing its own release notes. Then bump, which commits and tags:
 
 ```bash
 npm version patch
@@ -234,6 +235,10 @@ Then cut the release:
 ```bash
 npm run release
 ```
+
+Order matters: `npm version` tags the commit it creates, so anything committed
+afterwards sits outside the tag. If that happens the release script says so and
+tells you whether the tag is safe to drop and recreate.
 
 That runs preflight checks (clean tree, tag free, changelog entry present), the
 full test suite, and the Windows build; then tags, pushes, and publishes a GitHub
