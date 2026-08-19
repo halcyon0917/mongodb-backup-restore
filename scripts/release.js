@@ -134,6 +134,10 @@ if (!/^\d+\.\d+\.\d+/.test(VERSION)) problems.push(`version "${VERSION}" is not 
 else console.log(`  ok    version ${VERSION}`);
 
 const tagExists = tryGit('rev-parse', TAG) !== null;
+// `npm version` creates the tag as part of the bump, so an existing tag is only
+// a problem when it points somewhere other than what we are about to release.
+let tagAlreadyAtHead = false;
+
 if (PUBLISH_ONLY) {
   if (!tagExists) {
     problems.push(`tag ${TAG} does not exist — run without --publish-only to create it`);
@@ -141,10 +145,17 @@ if (PUBLISH_ONLY) {
     console.log(`  ok    tag ${TAG} exists, publishing the release for it`);
   }
 } else if (tagExists) {
-  problems.push(
-    `tag ${TAG} already exists — use --publish-only to publish its release, ` +
-      'or bump the version with "npm version <patch|minor|major>"'
-  );
+  const tagCommit = tryGit('rev-parse', `${TAG}^{commit}`);
+  const head = tryGit('rev-parse', 'HEAD');
+  if (tagCommit && tagCommit === head) {
+    tagAlreadyAtHead = true;
+    console.log(`  ok    tag ${TAG} already exists at HEAD — it will just be pushed`);
+  } else {
+    problems.push(
+      `tag ${TAG} exists but points at ${(tagCommit || '?').slice(0, 7)} rather than HEAD — ` +
+        'move it, or bump the version with "npm version <patch|minor|major>"'
+    );
+  }
 } else {
   console.log(`  ok    tag ${TAG} is free`);
 }
@@ -230,7 +241,11 @@ function downloadsSection() {
 if (PUBLISH_ONLY) {
   console.log(`\n> Tag ${TAG} is already pushed; skipping tag and push`);
 } else {
-  run(`Tagging ${TAG}`, 'git', ['tag', '-a', TAG, '-m', `${pkg.name} ${TAG}`]);
+  if (tagAlreadyAtHead) {
+    console.log(`\n> Tag ${TAG} already exists at HEAD; skipping tag`);
+  } else {
+    run(`Tagging ${TAG}`, 'git', ['tag', '-a', TAG, '-m', `${pkg.name} ${TAG}`]);
+  }
   run(`Pushing ${TAG}`, 'git', ['push', 'origin', TAG]);
 }
 
