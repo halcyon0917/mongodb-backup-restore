@@ -3,9 +3,10 @@
 /**
  * Cuts a release: preflight checks, tests, build, tag, then a GitHub release.
  *
- *   npm run release -- --dry-run     # report what would happen, change nothing
- *   npm run release                  # do it
- *   npm run release -- --skip-tests  # when the suite was just run
+ *   npm run release -- --dry-run       # report what would happen, change nothing
+ *   npm run release                    # do it
+ *   npm run release -- --skip-tests    # when the suite was just run
+ *   npm run release -- --publish-only  # tag is already pushed; just publish it
  *
  * The version comes from package.json — bump it with `npm version` first, which
  * writes the file, commits and tags in one step.
@@ -26,8 +27,13 @@ const TAG = `v${VERSION}`;
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
-const SKIP_TESTS = args.includes('--skip-tests');
-const SKIP_BUILD = args.includes('--skip-build');
+// Publishing can fail on its own (no gh installed, upload interrupted) after the
+// tag is already pushed. Without this the "tag already exists" guard would then
+// block every retry, so this mode publishes the release for a tag that is
+// already out there and touches nothing else.
+const PUBLISH_ONLY = args.includes('--publish-only');
+const SKIP_TESTS = args.includes('--skip-tests') || PUBLISH_ONLY;
+const SKIP_BUILD = args.includes('--skip-build') || PUBLISH_ONLY;
 
 const problems = [];
 const notes = [];
@@ -127,8 +133,18 @@ else console.log(`  ok    origin is ${remote}`);
 if (!/^\d+\.\d+\.\d+/.test(VERSION)) problems.push(`version "${VERSION}" is not semver`);
 else console.log(`  ok    version ${VERSION}`);
 
-if (tryGit('rev-parse', TAG) !== null) {
-  problems.push(`tag ${TAG} already exists — bump the version with "npm version <patch|minor|major>"`);
+const tagExists = tryGit('rev-parse', TAG) !== null;
+if (PUBLISH_ONLY) {
+  if (!tagExists) {
+    problems.push(`tag ${TAG} does not exist — run without --publish-only to create it`);
+  } else {
+    console.log(`  ok    tag ${TAG} exists, publishing the release for it`);
+  }
+} else if (tagExists) {
+  problems.push(
+    `tag ${TAG} already exists — use --publish-only to publish its release, ` +
+      'or bump the version with "npm version <patch|minor|major>"'
+  );
 } else {
   console.log(`  ok    tag ${TAG} is free`);
 }
@@ -211,8 +227,12 @@ function downloadsSection() {
   ].join('\n');
 }
 
-run(`Tagging ${TAG}`, 'git', ['tag', '-a', TAG, '-m', `${pkg.name} ${TAG}`]);
-run(`Pushing ${TAG}`, 'git', ['push', 'origin', TAG]);
+if (PUBLISH_ONLY) {
+  console.log(`\n> Tag ${TAG} is already pushed; skipping tag and push`);
+} else {
+  run(`Tagging ${TAG}`, 'git', ['tag', '-a', TAG, '-m', `${pkg.name} ${TAG}`]);
+  run(`Pushing ${TAG}`, 'git', ['push', 'origin', TAG]);
+}
 
 const notesFile = path.join(ROOT, 'release', 'RELEASE_NOTES.md');
 const fullNotes = `${downloadsSection()}\n${notesText}\n`;
