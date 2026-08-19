@@ -53,13 +53,23 @@ function has(command) {
   return probe.status === 0;
 }
 
-function run(label, command, commandArgs) {
+/**
+ * Run a step, stopping the release if it fails.
+ *
+ * `shell` matters. With a shell the arguments are re-joined into a single
+ * command line, so anything containing a space has to be quoted by hand — an
+ * unquoted tag message once split in two and left the version number sitting
+ * where git expected a commit. Executables we can invoke directly (git) take
+ * shell:false and receive their arguments verbatim; only the .cmd shims on
+ * Windows (npm, gh) need a shell, and their spaced arguments are quoted below.
+ */
+function run(label, command, commandArgs, { shell = false } = {}) {
   console.log(`\n> ${label}`);
   if (DRY_RUN) {
     console.log('  (dry run — skipped)');
     return true;
   }
-  const result = spawnSync(command, commandArgs, { cwd: ROOT, stdio: 'inherit', shell: true });
+  const result = spawnSync(command, commandArgs, { cwd: ROOT, stdio: 'inherit', shell });
   if (result.status !== 0) {
     console.error(`\n${label} failed. Release stopped; nothing was tagged or published.`);
     process.exit(1);
@@ -147,10 +157,10 @@ if (problems.length > 0) {
 
 // ── Steps ────────────────────────────────────────────────────────────────────
 
-if (!SKIP_TESTS) run('Running the test suite', 'npm', ['test']);
+if (!SKIP_TESTS) run('Running the test suite', 'npm', ['test'], { shell: true });
 else console.log('\n> Tests skipped by --skip-tests');
 
-if (!SKIP_BUILD) run('Building the Windows artifacts', 'npm', ['run', 'dist']);
+if (!SKIP_BUILD) run('Building the Windows artifacts', 'npm', ['run', 'dist'], { shell: true });
 else console.log('\n> Build skipped by --skip-build');
 
 const artifacts = [
@@ -182,16 +192,23 @@ if (!DRY_RUN) {
 }
 
 if (ghReady) {
-  run('Creating the GitHub release', 'gh', [
-    'release',
-    'create',
-    TAG,
-    ...artifacts.map((file) => `"${file}"`),
-    '--title',
-    `"${pkg.build.productName} ${VERSION}"`,
-    '--notes-file',
-    `"${notesFile}"`,
-  ]);
+  run(
+    'Creating the GitHub release',
+    'gh',
+    [
+      'release',
+      'create',
+      TAG,
+      // Quoted because this call does go through a shell: every one of these
+      // paths and titles contains spaces.
+      ...artifacts.map((file) => `"${file}"`),
+      '--title',
+      `"${pkg.build.productName} ${VERSION}"`,
+      '--notes-file',
+      `"${notesFile}"`,
+    ],
+    { shell: true }
+  );
   console.log(`\nReleased ${TAG}.`);
 } else {
   console.log('\nLocal release is ready. Finish on GitHub:');
