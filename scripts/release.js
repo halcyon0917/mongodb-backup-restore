@@ -16,6 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
@@ -175,20 +176,50 @@ if (missing.length > 0 && !DRY_RUN) {
   process.exit(1);
 }
 
-if (!DRY_RUN) {
-  for (const file of artifacts) {
-    const mb = (fs.statSync(file).size / 1024 / 1024).toFixed(0);
-    console.log(`  artifact  ${path.basename(file)}  ${mb} MB`);
-  }
+const present = artifacts.filter((file) => fs.existsSync(file));
+for (const file of present) {
+  const mb = (fs.statSync(file).size / 1024 / 1024).toFixed(0);
+  console.log(`  artifact  ${path.basename(file)}  ${mb} MB`);
+}
+
+/**
+ * A "what do I download" preamble for the release page.
+ *
+ * The executables are unsigned, so SmartScreen will warn about them. Publishing
+ * the SHA-256 of each one at least gives anyone a way to check that the file
+ * they downloaded is the file that was built.
+ */
+function downloadsSection() {
+  const digests = present.map(
+    (file) =>
+      `${crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')}  ${path.basename(file)}`
+  );
+
+  return [
+    '## Downloads',
+    '',
+    '| File | Use it when |',
+    '| --- | --- |',
+    `| **${path.basename(artifacts[0])}** | Normal install — pick a location, adds a Start Menu shortcut. |`,
+    `| **${path.basename(artifacts[1])}** | No install — run it from anywhere, including a USB stick. |`,
+    '| **Source code** (zip / tar.gz) | Attached by GitHub, built from the `' + TAG + '` tag. |',
+    '',
+    'Both executables are unsigned, so Windows SmartScreen warns on first run:',
+    'choose **More info** then **Run anyway**.',
+    '',
+    ...(digests.length > 0 ? ['SHA-256:', '', '```', ...digests, '```', ''] : []),
+  ].join('\n');
 }
 
 run(`Tagging ${TAG}`, 'git', ['tag', '-a', TAG, '-m', `${pkg.name} ${TAG}`]);
 run(`Pushing ${TAG}`, 'git', ['push', 'origin', TAG]);
 
 const notesFile = path.join(ROOT, 'release', 'RELEASE_NOTES.md');
+const fullNotes = `${downloadsSection()}\n${notesText}\n`;
 if (!DRY_RUN) {
   fs.mkdirSync(path.dirname(notesFile), { recursive: true });
-  fs.writeFileSync(notesFile, notesText + '\n', 'utf8');
+  fs.writeFileSync(notesFile, fullNotes, 'utf8');
+  console.log(`  notes     ${path.relative(ROOT, notesFile)} (${fullNotes.split('\n').length} lines)`);
 }
 
 if (ghReady) {

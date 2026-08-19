@@ -249,6 +249,19 @@ The GitHub step uses the [`gh` CLI](https://cli.github.com). Without it the loca
 steps still run and the manual instructions are printed instead — install it once
 with `winget install GitHub.cli` to automate the last step.
 
+Each release carries three things:
+
+| Asset | Source |
+| --- | --- |
+| `MongoDB Backup and Restore Setup <version>.exe` | uploaded by `npm run release` |
+| `MongoDB-Backup-Restore-<version>-portable.exe` | uploaded by `npm run release` |
+| Source code (zip / tar.gz) | attached by GitHub from the tag |
+
+The release notes are assembled from the changelog section for that version, with
+a downloads table and the SHA-256 of each executable prepended — the builds are
+unsigned, so a published digest is the only way to check a download is the file
+that was built.
+
 The executables are not committed: at 94 MB each they belong on a release, not in
 git history. `release/` is ignored for that reason.
 
