@@ -331,16 +331,38 @@ async function listCollections(uri, database) {
     const results = await Promise.all(
       visible.map(async (info) => {
         let documents = null;
+        let bytes = null;
+
         if (info.type !== 'view') {
-          documents = await db
+          // $collStats answers both questions in one round trip, so knowing the
+          // size costs nothing over knowing the count. It is not universally
+          // available though — some shared Atlas tiers and restricted roles
+          // refuse it — so a failure falls back to the count alone rather than
+          // leaving the collection unlisted.
+          const stats = await db
             .collection(info.name)
-            .estimatedDocumentCount()
+            .aggregate([{ $collStats: { storageStats: {} } }])
+            .next()
             .catch(() => null);
+
+          if (stats && stats.storageStats) {
+            documents = Number(stats.storageStats.count);
+            bytes = Number(stats.storageStats.size);
+            if (!Number.isFinite(documents)) documents = null;
+            if (!Number.isFinite(bytes)) bytes = null;
+          } else {
+            documents = await db
+              .collection(info.name)
+              .estimatedDocumentCount()
+              .catch(() => null);
+          }
         }
+
         return {
           name: info.name,
           type: info.type || 'collection',
           documents,
+          bytes,
         };
       })
     );

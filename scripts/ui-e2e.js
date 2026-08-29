@@ -5,10 +5,11 @@
  *
  *   npx electron scripts/ui-e2e.js [uri]
  *
- * Seeds a database, fills in the Backup form and clicks the button, waits for
- * the job to finish, then does the same on the Restore tab and verifies the
- * data landed. This exercises the IPC job-event plumbing (progress table, bar,
- * status text) that the engine-level smoke test cannot reach.
+ * Seeds a database, fills in the Back up view and clicks the button, waits for
+ * the job to finish, previews a restore against the live target, then runs it
+ * and verifies the data landed. This exercises the IPC job-event plumbing
+ * (per-collection progress, the action bar, history) that the engine-level
+ * smoke test cannot reach.
  */
 
 const fs = require('fs');
@@ -18,8 +19,8 @@ const fsp = require('fs/promises');
 const { app, BrowserWindow, dialog } = require('electron');
 const { MongoClient } = require('mongodb');
 
-// Both actions now sit behind a confirmation. Record what is asked and answer
-// it automatically, so the run is unattended and the wording can be asserted.
+// Both actions sit behind a confirmation. Record what is asked and answer it
+// automatically, so the run is unattended and the wording can be asserted.
 const dialogs = [];
 let nextResponse = 0; // 0 = the confirm button, 1 = cancel
 dialog.showMessageBox = async (...args) => {
@@ -31,11 +32,12 @@ dialog.showMessageBox = async (...args) => {
 };
 
 // Throwaway profile: the run fills in form fields, which the app persists as
-// preferences. Without this it would leave stale temp paths in real settings.
+// preferences and history. Without this it would pollute the real ones.
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mbr-profile-'));
 app.setPath('userData', PROFILE_DIR);
 
-const URI = process.argv.find((argument) => argument.startsWith('mongodb://')) || 'mongodb://127.0.0.1:27017';
+const URI =
+  process.argv.find((argument) => argument.startsWith('mongodb://')) || 'mongodb://127.0.0.1:27017';
 const SOURCE_DB = 'mbr_ui_source';
 const TARGET_DB = 'mbr_ui_target';
 const DOC_COUNT = 400;
@@ -74,6 +76,10 @@ async function seed() {
     await client.db(SOURCE_DB).collection('alpha').insertMany(documents);
     await client.db(SOURCE_DB).collection('beta').insertMany(documents.slice(0, 10));
     await client.db(SOURCE_DB).collection('alpha').createIndex({ name: 1 }, { name: 'name_idx' });
+
+    // Something already in the target, so the dry run has a real number to
+    // report rather than an empty database that makes every mode look alike.
+    await client.db(TARGET_DB).collection('alpha').insertMany(documents.slice(0, 25));
   } finally {
     await client.close();
   }
@@ -105,10 +111,10 @@ async function cleanup() {
 }
 
 /**
- * Poll the status heading until it reaches a terminal state for this job.
+ * Poll the action bar until it reaches a terminal state for this job.
  *
  * Matching a specific finished title rather than "no longer in progress"
- * matters because a confirmation dialog now sits between the click and the job
+ * matters because a confirmation dialog sits between the click and the job
  * starting: sampling too early would otherwise read the previous job's title
  * and return straight away.
  */
@@ -118,12 +124,12 @@ async function waitForJob(window, terminal, timeoutMs = 90000) {
   while (Date.now() < deadline) {
     const status = await window.webContents.executeJavaScript(
       `({
-        title: document.getElementById('statusTitle').textContent,
-        detail: document.getElementById('statusDetail').textContent,
-        width: document.getElementById('progressFill').style.width,
-        rows: document.querySelectorAll('#progressRows tr').length,
-        done: document.querySelectorAll('#progressRows .badge.done').length,
-        failed: document.querySelectorAll('#progressRows .badge.error').length,
+        title: document.getElementById('actionTitle').textContent,
+        detail: document.getElementById('actionDetail').textContent,
+        rows: document.querySelectorAll('.view.is-active .collection').length,
+        done: document.querySelectorAll('.view.is-active .collection-meta.is-done').length,
+        failed: document.querySelectorAll('.view.is-active .collection-meta.is-error').length,
+        bars: [...document.querySelectorAll('.view.is-active .collection-bar')].map((b) => b.style.width),
         lastLog: (document.querySelector('#log .log-line:last-child') || {}).textContent || '',
       })`,
       true
@@ -135,8 +141,8 @@ async function waitForJob(window, terminal, timeoutMs = 90000) {
   return last || { title: 'TIMEOUT' };
 }
 
-const BACKUP_DONE = /^Backup (complete|failed|cancelled)/;
-const RESTORE_DONE = /^Restore (complete|failed|cancelled)/;
+const BACKUP_DONE = /^Backup (complete|failed|stopped)/;
+const RESTORE_DONE = /^Restore (complete|failed|stopped)/;
 
 app.whenReady().then(async () => {
   const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mbr-ui-'));
@@ -152,71 +158,78 @@ app.whenReady().then(async () => {
       await new Promise((resolve) => window.webContents.once('did-finish-load', resolve));
     }
     await sleep(900);
+    const run = (script) => window.webContents.executeJavaScript(script, true);
 
-    /* ── Selecting a saved connection connects and lists databases ── */
-    console.log('');
-    console.log('── saved connection connects automatically ──');
-    const profileResult = await window.webContents.executeJavaScript(
+    /* ── Picking a saved connection in the sidebar connects on its own ── */
+    console.log('\n── the sidebar connects without a second click ──');
+    const sidebar = await run(
       `(async () => {
         if (!state.settings.encryptionAvailable) return { skipped: true };
 
         const saved = await window.api.saveProfile({
-          name: 'e2e local',
-          uri: ${JSON.stringify(URI)},
-          database: '',
+          name: 'e2e local', uri: ${JSON.stringify(URI)}, database: '',
         });
         if (!saved.ok) return { error: saved.error };
         state.settings = saved.data;
-        renderProfiles();
+        renderConnections();
 
-        const select = document.getElementById('backupProfile');
-        const option = [...select.options].find((o) => o.textContent === 'e2e local');
-        select.value = option.value;
-        // Nothing else is touched: selection alone must do the work.
-        select.dispatchEvent(new Event('change'));
+        const row = [...document.querySelectorAll('.conn')]
+          .find((el) => el.textContent.includes('e2e local'));
+        if (!row) return { error: 'the saved connection did not render in the sidebar' };
+        // Nothing else is touched: the click alone must do the work.
+        row.querySelector('.conn-main').click();
 
         for (let i = 0; i < 100; i += 1) {
           await new Promise((r) => setTimeout(r, 100));
           if (state.combos.backup.count > 0) break;
         }
 
-        const statusEl = document.getElementById('backupConnStatus');
+        const badge = document.getElementById('backupConnState');
         return {
-          uriFilled: document.getElementById('backupUri').value.length > 0,
-          status: statusEl.textContent,
-          statusOk: statusEl.className.includes('ok'),
+          backupUri: document.getElementById('backupUri').value,
+          // One connection serves the whole app, so the restore view has to be
+          // showing the same server rather than a stale one.
+          restoreUri: document.getElementById('restoreUri').value,
+          badge: badge.textContent,
+          badgeState: badge.dataset.state,
           databases: state.combos.backup.count,
+          restoreDatabases: state.combos.restore.count,
+          dotLive: [...document.querySelectorAll('.conn')].some((el) => el.classList.contains('is-live')),
+          hasEdit: Boolean(row.querySelector('.conn-edit')),
         };
-      })()`,
-      true
+      })()`
     );
 
-    if (profileResult.skipped) {
-      console.log('  SKIPPED  credential encryption unavailable, cannot save a profile');
+    if (sidebar.skipped) {
+      console.log('  SKIPPED  credential encryption unavailable, cannot save a connection');
+    } else if (sidebar.error) {
+      check('the saved connection could be created', false, sidebar.error);
     } else {
+      check('clicking a saved connection fills the URI', sidebar.backupUri === URI, sidebar.backupUri);
       check(
-        'selecting a saved connection fills the URI',
-        profileResult.uriFilled === true,
-        JSON.stringify(profileResult)
+        'both views share that one connection',
+        sidebar.restoreUri === URI,
+        `backup="${sidebar.backupUri}" restore="${sidebar.restoreUri}"`
       );
       check(
-        'it connects without pressing Test connection',
-        profileResult.statusOk === true && /^Connected — MongoDB/.test(profileResult.status || ''),
-        `status="${profileResult.status}"`
+        'it connects without pressing Test',
+        sidebar.badgeState === 'ok' && /^Connected · MongoDB/.test(sidebar.badge || ''),
+        `badge="${sidebar.badge}" state=${sidebar.badgeState}`
       );
       check(
-        'it loads the database list without pressing Load',
-        profileResult.databases > 0,
-        `databases=${profileResult.databases}`
+        'it loads the database list for both views',
+        sidebar.databases > 0 && sidebar.restoreDatabases === sidebar.databases,
+        `backup=${sidebar.databases} restore=${sidebar.restoreDatabases}`
       );
+      check('the sidebar marks the connection as reachable', sidebar.dotLive === true);
+      check('each row offers an Edit control', sidebar.hasEdit === true);
     }
 
-    /* ── Selecting a database auto-loads its collections ── */
-    console.log('');
-    console.log('── database selection fills the Advanced column ──');
-    const autoLoaded = await window.webContents.executeJavaScript(
+    /* ── Choosing a database fills the Collections card ── */
+    console.log('\n── choosing a database fills the Collections card ──');
+    const autoLoaded = await run(
       `(async () => {
-        const count = () => document.querySelectorAll('#backupCollections input').length;
+        const count = () => document.querySelectorAll('#backupCollections .collection').length;
         const before = count();
         document.getElementById('backupUri').value = ${JSON.stringify(URI)};
         const field = document.getElementById('backupDatabase');
@@ -227,56 +240,64 @@ app.whenReady().then(async () => {
           await new Promise((r) => setTimeout(r, 100));
           if (count() > 0) break;
         }
-        const boxes = [...document.querySelectorAll('#backupCollections input')];
+        const rows = [...document.querySelectorAll('#backupCollections .collection')];
         return {
           before,
-          names: boxes.map((el) => el.value).sort(),
-          allChecked: boxes.every((el) => el.checked),
+          names: rows.map((el) => el.dataset.name).sort(),
+          allChecked: rows.every((el) => el.querySelector('input').checked),
+          footer: document.getElementById('backupCollectionsFooter').textContent,
+          actionDetail: document.getElementById('actionDetail').textContent,
+          primaryEnabled: !document.getElementById('actionPrimary').disabled,
         };
-      })()`,
-      true
+      })()`
     );
 
-    check(
-      'the collection list starts empty',
-      autoLoaded.before === 0,
-      `found ${autoLoaded.before} before selecting`
-    );
+    check('the collection list starts empty', autoLoaded.before === 0, `found ${autoLoaded.before}`);
     check(
       'choosing a database auto-loads its collections',
       JSON.stringify(autoLoaded.names) === JSON.stringify(['alpha', 'beta']),
       `got [${autoLoaded.names}]`
     );
     check('auto-loaded collections all start selected', autoLoaded.allChecked === true);
+    check(
+      'the card footer counts the selection',
+      /2 of 2 selected/.test(autoLoaded.footer),
+      autoLoaded.footer
+    );
+    check(
+      'the action bar unblocks and totals the documents',
+      autoLoaded.primaryEnabled === true && autoLoaded.actionDetail.includes(String(DOC_COUNT + 10)),
+      `enabled=${autoLoaded.primaryEnabled} detail="${autoLoaded.actionDetail}"`
+    );
 
-    /* ── Backup through the UI ── */
-    console.log('\n── backup via the Backup tab ──');
-    await window.webContents.executeJavaScript(
+    /* ── Backup ── */
+    console.log('\n── backup from the Back up view ──');
+    await run(
       `(() => {
-        document.getElementById('backupUri').value = ${JSON.stringify(URI)};
-        document.getElementById('backupDatabase').value = ${JSON.stringify(SOURCE_DB)};
         document.getElementById('backupOutput').value = ${JSON.stringify(workDir)};
-        document.getElementById('backupStart').click();
+        document.getElementById('backupOutput').dispatchEvent(new Event('input'));
+        document.getElementById('actionPrimary').click();
         return true;
-      })()`,
-      true
+      })()`
     );
 
     const backupStatus = await waitForJob(window, BACKUP_DONE);
     check(
       'backup finishes and reports completion',
       backupStatus.title === 'Backup complete',
-      `status="${backupStatus.title}" log="${backupStatus.lastLog}"`
+      `title="${backupStatus.title}" log="${backupStatus.lastLog}"`
     );
     check(
-      'progress table shows both collections as done',
-      backupStatus.rows === 2 && backupStatus.done === 2 && backupStatus.failed === 0,
-      `rows=${backupStatus.rows} done=${backupStatus.done} failed=${backupStatus.failed}`
+      'every collection row reports done with a full bar',
+      backupStatus.rows === 2 &&
+        backupStatus.done === 2 &&
+        backupStatus.failed === 0 &&
+        backupStatus.bars.every((width) => width === '100%'),
+      `rows=${backupStatus.rows} done=${backupStatus.done} bars=${backupStatus.bars}`
     );
-    check('progress bar reaches 100%', backupStatus.width === '100%', backupStatus.width);
     check(
-      'summary line reports the document count',
-      backupStatus.detail.includes(String(DOC_COUNT + 10)),
+      'the summary reports the document count and where it went',
+      backupStatus.detail.includes(String(DOC_COUNT + 10)) && backupStatus.detail.includes(workDir),
       backupStatus.detail
     );
 
@@ -301,20 +322,13 @@ app.whenReady().then(async () => {
     const declined = await (async () => {
       const seen = dialogs.length;
       nextResponse = 1;
-      await window.webContents.executeJavaScript(
-        "document.getElementById('backupStart').click()",
-        true
-      );
+      await run("document.getElementById('actionPrimary').click()");
       await sleep(900);
       return {
         asked: dialogs.length > seen,
-        title: await window.webContents.executeJavaScript(
-          "document.getElementById('statusTitle').textContent",
-          true
-        ),
-        lastLog: await window.webContents.executeJavaScript(
-          "(document.querySelector('#log .log-line:last-child') || {}).textContent || ''",
-          true
+        title: await run("document.getElementById('actionTitle').textContent"),
+        lastLog: await run(
+          "(document.querySelector('#log .log-line:last-child') || {}).textContent || ''"
         ),
       };
     })();
@@ -324,46 +338,64 @@ app.whenReady().then(async () => {
       `title="${declined.title}" log="${declined.lastLog}"`
     );
 
-    const uiState = await window.webContents.executeJavaScript(
-      `({ folder: state.lastBackupFolder, openEnabled: !document.getElementById('backupOpenFolder').disabled })`,
-      true
+    const uiState = await run(
+      `({
+        folder: state.lastBackupFolder,
+        openEnabled: !document.getElementById('actionSecondary').disabled,
+        secondaryLabel: document.getElementById('actionSecondary').textContent,
+      })`
     );
-    check('"Open backup folder" became available', uiState.openEnabled === true);
+    check(
+      '"Open backup folder" became available',
+      uiState.openEnabled === true && uiState.secondaryLabel === 'Open backup folder',
+      `enabled=${uiState.openEnabled} label="${uiState.secondaryLabel}"`
+    );
     check(
       'backup folder is a timestamped subfolder of the chosen output',
       typeof uiState.folder === 'string' && uiState.folder.startsWith(workDir),
       uiState.folder
     );
 
-    /* ── Restore through the UI ── */
-    console.log('\n── restore via the Restore tab ──');
-    const inspected = await window.webContents.executeJavaScript(
+    /* ── Restore view picks the backup up ── */
+    console.log('\n── restore from the Restore view ──');
+    const inspected = await run(
       `(async () => {
-        document.querySelector('.tab[data-tab="restore"]').click();
-        document.getElementById('restoreUri').value = ${JSON.stringify(URI)};
+        document.querySelector('.nav[data-view="restore"]').click();
         document.getElementById('restoreSource').value = state.lastBackupFolder;
         document.getElementById('restoreSource').dispatchEvent(new Event('change'));
         await new Promise((r) => setTimeout(r, 1200));
         return {
-          status: document.getElementById('restoreSourceStatus').textContent,
-          statusClass: document.getElementById('restoreSourceStatus').className,
-          collections: [...document.querySelectorAll('#restoreCollections input')].map((el) => el.value),
+          activeView: (document.querySelector('.view.is-active') || {}).id,
+          factsVisible: !document.getElementById('restoreFacts').classList.contains('hidden'),
+          factDatabase: document.getElementById('factDatabase').textContent,
+          factContents: document.getElementById('factContents').textContent,
+          factTaken: document.getElementById('factTaken').textContent,
+          provenance: document.getElementById('restoreSourceStatus').textContent,
+          collections: [...document.querySelectorAll('#restoreCollections .collection')]
+            .map((el) => el.dataset.name).sort(),
           targetPrefilled: document.getElementById('restoreTargetDatabase').value,
-          activePanel: (document.querySelector('.panel.is-active') || {}).id,
+          targetState: document.getElementById('restoreTargetState').textContent,
         };
-      })()`,
-      true
+      })()`
     );
 
-    check('clicking the Restore tab switches panels', inspected.activePanel === 'panel-restore', inspected.activePanel);
+    check('clicking Restore switches views', inspected.activeView === 'view-restore', inspected.activeView);
     check(
-      'picking the folder auto-detects the backup',
-      inspected.statusClass.includes('ok') && inspected.status.includes(SOURCE_DB),
-      `"${inspected.status}"`
+      'the backup is summarised in the facts strip',
+      inspected.factsVisible === true &&
+        inspected.factDatabase === SOURCE_DB &&
+        inspected.factContents.includes('2 collections') &&
+        inspected.factTaken !== 'unknown',
+      JSON.stringify(inspected)
+    );
+    check(
+      'the source line reports where the backup came from',
+      /Made by this app/.test(inspected.provenance),
+      inspected.provenance
     );
     check(
       'both collections are listed for restore',
-      JSON.stringify(inspected.collections.sort()) === JSON.stringify(['alpha', 'beta']),
+      JSON.stringify(inspected.collections) === JSON.stringify(['alpha', 'beta']),
       inspected.collections.join(', ')
     );
     check(
@@ -371,23 +403,82 @@ app.whenReady().then(async () => {
       inspected.targetPrefilled === SOURCE_DB,
       inspected.targetPrefilled
     );
-
-    // Restore into a different database name, in the default non-destructive mode
-    // (so no native confirmation dialog appears and blocks the run).
-    await window.webContents.executeJavaScript(
-      `(() => {
-        document.getElementById('restoreTargetDatabase').value = ${JSON.stringify(TARGET_DB)};
-        document.getElementById('restoreStart').click();
-        return true;
-      })()`,
-      true
+    check(
+      'the target is marked as one that already exists',
+      inspected.targetState === 'exists',
+      `"${inspected.targetState}"`
     );
+
+    /* ── Dry run against the live target ── */
+    console.log('\n── dry run reads the target without writing ──');
+    const dry = await run(
+      `(async () => {
+        const field = document.getElementById('restoreTargetDatabase');
+        field.value = ${JSON.stringify(TARGET_DB)};
+        field.dispatchEvent(new Event('change'));
+        document.getElementById('actionSecondary').click();
+        for (let i = 0; i < 100; i += 1) {
+          await new Promise((r) => setTimeout(r, 100));
+          if (!document.getElementById('dryCard').classList.contains('hidden')) break;
+        }
+        const rows = [...document.querySelectorAll('.dry-row')].map((row) => ({
+          name: row.querySelector('.dry-name').textContent,
+          inBackup: row.querySelectorAll('.dry-count')[0].textContent,
+          inTarget: row.querySelectorAll('.dry-count')[1].textContent,
+          outcome: row.querySelector('.dry-outcome').textContent,
+          tone: row.querySelector('.dry-outcome').dataset.tone,
+        }));
+        return {
+          visible: !document.getElementById('dryCard').classList.contains('hidden'),
+          rows,
+          total: document.getElementById('dryTotal').textContent,
+          secondaryLabel: document.getElementById('actionSecondary').textContent,
+        };
+      })()`
+    );
+
+    check('the secondary action is the dry run on this view', dry.secondaryLabel === 'Preview (dry run)', dry.secondaryLabel);
+    check('the dry run renders a result table', dry.visible === true && dry.rows.length === 2, JSON.stringify(dry.rows));
+    {
+      const alpha = dry.rows.find((row) => row.name === 'alpha');
+      check(
+        'it counts what is really in the target right now',
+        Boolean(alpha) && alpha.inTarget === '25' && alpha.inBackup === '400',
+        JSON.stringify(alpha)
+      );
+      check(
+        'it says the safe mode skips rather than overwrites',
+        Boolean(alpha) && /skipping any of the 25/.test(alpha.outcome),
+        alpha ? alpha.outcome : ''
+      );
+      const beta = dry.rows.find((row) => row.name === 'beta');
+      check(
+        'a collection missing from the target is a plain insert',
+        Boolean(beta) && beta.inTarget === '—' && /^insert 10$/.test(beta.outcome) && beta.tone === 'safe',
+        JSON.stringify(beta)
+      );
+    }
+    check(
+      'the summary promises nothing existing is deleted',
+      /Nothing existing is deleted or changed/.test(dry.total),
+      dry.total
+    );
+
+    const targetBefore = await verifyRestored();
+    check(
+      'the dry run really wrote nothing',
+      targetBefore.alpha === 25 && targetBefore.beta === 0,
+      `alpha=${targetBefore.alpha} beta=${targetBefore.beta}`
+    );
+
+    /* ── Restore, in the default non-destructive mode ── */
+    await run("document.getElementById('actionPrimary').click()");
 
     const restoreStatus = await waitForJob(window, RESTORE_DONE);
     check(
       'restore finishes and reports completion',
       restoreStatus.title === 'Restore complete',
-      `status="${restoreStatus.title}" log="${restoreStatus.lastLog}"`
+      `title="${restoreStatus.title}" log="${restoreStatus.lastLog}"`
     );
     check(
       'restore summary names the target database',
@@ -415,24 +506,66 @@ app.whenReady().then(async () => {
       restored.alpha === DOC_COUNT && restored.beta === 10,
       `alpha=${restored.alpha} beta=${restored.beta}`
     );
-    check(
-      'index was recreated in the target',
-      restored.indexes.includes('name_idx'),
-      restored.indexes.join(', ')
+    check('index was recreated in the target', restored.indexes.includes('name_idx'), restored.indexes.join(', '));
+
+    /* ── History recorded both runs ── */
+    console.log('\n── both runs land in History ──');
+    const history = await run(
+      `(async () => {
+        document.querySelector('.nav[data-view="history"]').click();
+        await new Promise((r) => setTimeout(r, 500));
+        const cards = [...document.querySelectorAll('.run')];
+        return {
+          count: state.history.length,
+          badge: document.getElementById('historyCount').textContent,
+          barHidden: document.getElementById('actionBar').classList.contains('hidden'),
+          kinds: state.history.map((h) => h.kind + ':' + h.status),
+          databases: state.history.map((h) => h.database),
+          hosts: state.history.map((h) => h.host),
+          // Nothing on this screen may carry a password.
+          text: cards.map((c) => c.textContent).join(' ').replace(/\\s+/g, ' '),
+        };
+      })()`
     );
 
-    const finalState = await window.webContents.executeJavaScript(
-      `({
-        cancelHidden: document.getElementById('jobCancel').classList.contains('hidden'),
-        backupEnabled: !document.getElementById('backupStart').disabled,
-        restoreEnabled: !document.getElementById('restoreStart').disabled,
-        errorLines: document.querySelectorAll('#log .log-line.error').length,
-      })`,
-      true
+    check(
+      'both runs were recorded, newest first',
+      history.count === 2 &&
+        history.kinds[0] === 'restore:done' &&
+        history.kinds[1] === 'backup:done',
+      JSON.stringify(history.kinds)
     );
-    check('buttons re-enable after the job', finalState.backupEnabled && finalState.restoreEnabled);
-    check('cancel button is hidden again', finalState.cancelHidden === true);
-    check('no errors were logged', finalState.errorLines === 0, `${finalState.errorLines} error line(s)`);
+    check(
+      'each run names its database',
+      history.databases[0] === TARGET_DB && history.databases[1] === SOURCE_DB,
+      JSON.stringify(history.databases)
+    );
+    check(
+      'history keeps the host but never the connection string',
+      history.hosts.every((host) => host === '127.0.0.1:27017') &&
+        !history.text.includes('mongodb://'),
+      JSON.stringify(history.hosts)
+    );
+    check('the History badge counts the runs', history.badge === '2', `badge="${history.badge}"`);
+    check('the history view hides the action bar', history.barHidden === true);
+
+    // Verify on disk, since the file outlives the session.
+    const historyFile = path.join(PROFILE_DIR, 'history.json');
+    const raw = fs.existsSync(historyFile) ? fs.readFileSync(historyFile, 'utf8') : '';
+    check(
+      'history is persisted without any connection string',
+      raw.includes(SOURCE_DB) && !raw.includes('mongodb://') && !/"uri"/.test(raw),
+      raw.slice(0, 200)
+    );
+
+    const finalState = await run(
+      `({
+        primaryEnabled: !document.getElementById('actionPrimary').disabled,
+        errorLines: document.querySelectorAll('#log .log-line.error').length,
+        errorText: [...document.querySelectorAll('#log .log-line.error')].map((l) => l.textContent).join(' | '),
+      })`
+    );
+    check('no errors were logged', finalState.errorLines === 0, finalState.errorText);
   } catch (error) {
     check('e2e run completed without throwing', false, error.stack || error.message);
   } finally {

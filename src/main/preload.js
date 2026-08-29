@@ -7,6 +7,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   appInfo: () => ipcRenderer.invoke('app:info'),
 
+  // The window has no OS frame, so its buttons are ordinary DOM and have to
+  // reach the real window through here.
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggleMaximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+
   selectFolder: (options) => ipcRenderer.invoke('dialog:selectFolder', options),
   confirm: (options) => ipcRenderer.invoke('dialog:confirm', options),
   saveLog: (text) => ipcRenderer.invoke('dialog:saveLog', text),
@@ -19,9 +25,14 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('mongo:listCollections', { uri, database }),
 
   inspectBackup: (folder) => ipcRenderer.invoke('restore:inspect', folder),
+  previewRestore: (request) => ipcRenderer.invoke('restore:preview', request),
   startBackup: (request) => ipcRenderer.invoke('backup:start', request),
   startRestore: (request) => ipcRenderer.invoke('restore:start', request),
   cancelJob: (jobId) => ipcRenderer.invoke('job:cancel', jobId),
+
+  listHistory: () => ipcRenderer.invoke('history:list'),
+  removeHistory: (id) => ipcRenderer.invoke('history:remove', id),
+  clearHistory: () => ipcRenderer.invoke('history:clear'),
 
   getSettings: () => ipcRenderer.invoke('settings:get'),
   savePrefs: (prefs) => ipcRenderer.invoke('settings:savePrefs', prefs),
@@ -32,5 +43,11 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('job:event', handler);
     return () => ipcRenderer.removeListener('job:event', handler);
+  },
+
+  onWindowState: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('window:state', handler);
+    return () => ipcRenderer.removeListener('window:state', handler);
   },
 });

@@ -78,6 +78,7 @@ function getSettings() {
       id: profile.id,
       name: profile.name,
       database: profile.database || '',
+      production: Boolean(profile.production),
       uri: decryptSecret(profile.uri),
     })),
   };
@@ -90,9 +91,21 @@ async function savePrefs(prefs) {
   return data.prefs;
 }
 
+/**
+ * Create a connection, or update the one whose id is given.
+ *
+ * Identity is the id and nothing else. This used to also match on the name,
+ * which meant saving a *new* connection under a name already in use silently
+ * replaced that one instead of adding to the list. A name collision is now
+ * reported rather than resolved by overwriting, so nothing is ever lost to a
+ * coincidence.
+ */
 async function saveProfile(profile) {
   if (!profile || !profile.name || !String(profile.name).trim()) {
     throw new Error('Give the connection a name before saving it.');
+  }
+  if (!profile.uri || !String(profile.uri).trim()) {
+    throw new Error('Enter the MongoDB URI for this connection.');
   }
   if (!encryptionAvailable()) {
     throw new Error(
@@ -102,15 +115,27 @@ async function saveProfile(profile) {
 
   const data = load();
   const name = String(profile.name).trim();
-  const existing = data.profiles.find(
+  const id = profile.id ? String(profile.id) : null;
+
+  const existing = id ? data.profiles.find((candidate) => candidate.id === id) : null;
+  if (id && !existing) {
+    throw new Error('That saved connection no longer exists — it may have been deleted.');
+  }
+
+  const clash = data.profiles.find(
     (candidate) =>
-      candidate.id === profile.id || candidate.name.toLowerCase() === name.toLowerCase()
+      candidate.name.toLowerCase() === name.toLowerCase() &&
+      candidate.id !== (existing && existing.id)
   );
+  if (clash) {
+    throw new Error(`A connection called "${name}" already exists. Pick a different name.`);
+  }
 
   const record = {
     id: (existing && existing.id) || crypto.randomUUID(),
     name,
     database: profile.database ? String(profile.database).trim() : '',
+    production: Boolean(profile.production),
     uri: encryptSecret(profile.uri),
   };
 

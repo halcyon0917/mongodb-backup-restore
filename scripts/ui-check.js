@@ -16,7 +16,7 @@ const path = require('path');
 const { app, BrowserWindow } = require('electron');
 
 // Point the app at a throwaway profile before it starts, so a test run never
-// reads or writes the real saved connections and preferences.
+// reads or writes the real saved connections, preferences or history.
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mbr-profile-'));
 app.setPath('userData', PROFILE_DIR);
 
@@ -47,33 +47,52 @@ app.on('browser-window-created', (_event, window) => {
 // Boot the actual application.
 require('../src/main/main.js');
 
-const PROBE = `(() => {
+const PROBE = `(async () => {
+  await document.fonts.ready;
   const ids = [
-    'backupUri', 'backupDatabase', 'backupOutput', 'backupStart', 'backupGzip',
-    'restoreUri', 'restoreSource', 'restoreTargetDatabase', 'restoreStart',
-    'progressRows', 'log', 'statusTitle', 'progressFill', 'jobCancel',
+    'winMinimize', 'winMaximize', 'winClose', 'historyCount', 'connectionList',
+    'connectionAdd', 'connectionDialog', 'connectionName', 'connectionUri',
+    'connectionDatabase', 'connectionProduction', 'connectionStatus', 'connectionSave',
+    'connectionTest', 'connectionDelete', 'connectionCancel',
+    'themeDark', 'themeLight', 'appVersion', 'flowStrip',
+    'backupUri', 'backupDatabase', 'backupOutput', 'backupResolved', 'backupGzip',
+    'backupCollections', 'backupCollectionsFooter',
+    'restoreUri', 'restoreSource', 'restoreTargetDatabase', 'restoreCollections',
+    'restoreConfirmRow', 'restoreDropConfirm', 'dryCard', 'dryRows', 'dryTotal',
+    'actionBar', 'actionPrimary', 'actionSecondary', 'actionTitle', 'actionDetail',
+    'actionProgress', 'logDock', 'logToggle', 'log', 'logTail',
+    'historyList', 'historySummary', 'historyClear', 'aboutDialog',
   ];
   return {
     hasApi: typeof window.api === 'object' && window.api !== null,
     apiMethods: window.api ? Object.keys(window.api).sort() : [],
     missingIds: ids.filter((id) => !document.getElementById(id)),
-    tabCount: document.querySelectorAll('.tab').length,
-    activePanel: (document.querySelector('.panel.is-active') || {}).id || null,
+    navCount: document.querySelectorAll('.nav').length,
+    activeView: (document.querySelector('.view.is-active') || {}).id || null,
     restoreModes: [...document.querySelectorAll('input[name="restoreMode"]')].map((el) => el.value),
     logLines: document.querySelectorAll('#log .log-line').length,
-    statusTitle: document.getElementById('statusTitle').textContent,
     versionPill: document.getElementById('appVersion').textContent,
     backupOutput: document.getElementById('backupOutput').value,
-    cancelHidden: document.getElementById('jobCancel').classList.contains('hidden'),
+    resolved: document.getElementById('backupResolved').textContent,
+    actionTitle: document.getElementById('actionTitle').textContent,
+    primaryDisabled: document.getElementById('actionPrimary').disabled,
     bodyOverflows: document.body.scrollWidth > window.innerWidth + 1,
+    // The window has no OS frame, so the app draws and drags its own.
+    titlebarRegion: getComputedStyle(document.querySelector('.titlebar')).webkitAppRegion,
+    controlsRegion: getComputedStyle(document.querySelector('.window-controls')).webkitAppRegion,
+    windowButtons: document.querySelectorAll('.window-button').length,
+    // A missing font file fails silently under CSP; this catches it.
+    manrope: document.fonts.check('600 13px Manrope'),
+    spaceMono: document.fonts.check('12px "Space Mono"'),
   };
 })()`;
 
 const EXPECTED_API = [
-  'appInfo', 'cancelJob', 'confirm', 'deleteProfile', 'getSettings', 'inspectBackup',
-  'listCollections', 'listDatabases', 'onJobEvent', 'openPath', 'saveLog', 'savePrefs',
-  'saveProfile', 'selectFolder', 'startBackup', 'startRestore', 'surveyConnection',
-  'testConnection',
+  'appInfo', 'cancelJob', 'clearHistory', 'closeWindow', 'confirm', 'deleteProfile',
+  'getSettings', 'inspectBackup', 'listCollections', 'listDatabases', 'listHistory',
+  'minimizeWindow', 'onJobEvent', 'onWindowState', 'openPath', 'previewRestore',
+  'removeHistory', 'saveLog', 'savePrefs', 'saveProfile', 'selectFolder', 'startBackup',
+  'startRestore', 'surveyConnection', 'testConnection', 'toggleMaximizeWindow',
 ];
 
 function check(label, condition, detail) {
@@ -117,8 +136,10 @@ app.whenReady().then(async () => {
   // Let renderer init() finish its async IPC calls.
   await new Promise((resolve) => setTimeout(resolve, 900));
 
+  const run = (script) => window.webContents.executeJavaScript(script, true);
+
   try {
-    const probe = await window.webContents.executeJavaScript(PROBE, true);
+    const probe = await run(PROBE);
 
     check('preload bridge is exposed on window.api', probe.hasApi);
     check(
@@ -131,18 +152,25 @@ app.whenReady().then(async () => {
       probe.missingIds.length === 0,
       `missing: ${probe.missingIds.join(', ')}`
     );
-    check('two tabs render, Backup active', probe.tabCount === 2 && probe.activePanel === 'panel-backup', `tabs=${probe.tabCount} active=${probe.activePanel}`);
+    check(
+      'three views render, Back up active',
+      probe.navCount === 3 && probe.activeView === 'view-backup',
+      `navs=${probe.navCount} active=${probe.activeView}`
+    );
     check(
       'all four restore modes render',
       probe.restoreModes.length === 4 && probe.restoreModes[0] === 'keep',
       probe.restoreModes.join(', ')
     );
     check('renderer init() ran (log has lines)', probe.logLines > 0, `lines=${probe.logLines}`);
-    check('status starts at Idle', probe.statusTitle === 'Idle', probe.statusTitle);
-    check('cancel button starts hidden', probe.cancelHidden === true);
     check(
-      'appInfo IPC round trip populated the version pill',
-      /^v\d+\.\d+\.\d+ · Electron/.test(probe.versionPill),
+      'the action bar starts on Ready with the button held back',
+      probe.actionTitle === 'Ready to back up' && probe.primaryDisabled === true,
+      `title="${probe.actionTitle}" disabled=${probe.primaryDisabled}`
+    );
+    check(
+      'appInfo IPC round trip populated the version',
+      /^v\d+\.\d+\.\d+$/.test(probe.versionPill),
       `pill="${probe.versionPill}"`
     );
     {
@@ -150,7 +178,7 @@ app.whenReady().then(async () => {
       const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
       check(
         'the version shown is the app version from package.json',
-        probe.versionPill.startsWith(`v${pkg.version} ·`),
+        probe.versionPill === `v${pkg.version}`,
         `pill="${probe.versionPill}" package.json=${pkg.version}`
       );
     }
@@ -159,20 +187,40 @@ app.whenReady().then(async () => {
       /MongoDB Backups$/.test(probe.backupOutput),
       probe.backupOutput
     );
+    check(
+      'the resolved path previews the folder this run would write',
+      probe.resolved.includes('MongoDB Backups') && probe.resolved.includes('<timestamp>'),
+      probe.resolved
+    );
     check('page does not scroll horizontally', probe.bodyOverflows === false);
 
-    // Exercise a real IPC call that touches MongoDB error handling.
-    const badConnection = await window.webContents.executeJavaScript(
-      "window.api.testConnection('not-a-uri')",
-      true
+    // Frameless window: without a drag region the window cannot be moved at
+    // all, and without no-drag on the buttons they cannot be clicked.
+    check(
+      'the title bar is draggable',
+      probe.titlebarRegion === 'drag',
+      `app-region=${probe.titlebarRegion}`
     );
+    check(
+      'the window buttons are clickable, not part of the drag region',
+      probe.controlsRegion === 'no-drag' && probe.windowButtons === 3,
+      `app-region=${probe.controlsRegion} buttons=${probe.windowButtons}`
+    );
+
+    // The fonts are bundled and loaded under a CSP that allows font-src 'self'
+    // only; a wrong path or a blocked request degrades silently to a fallback.
+    check('the bundled Manrope loaded', probe.manrope === true);
+    check('the bundled Space Mono loaded', probe.spaceMono === true);
+
+    // Exercise a real IPC call that touches MongoDB error handling.
+    const badConnection = await run("window.api.testConnection('not-a-uri')");
     check(
       'a bad URI comes back as a handled error, not a crash',
       badConnection && badConnection.ok === false && /mongodb:\/\//.test(badConnection.error),
       JSON.stringify(badConnection)
     );
 
-    const settings = await window.webContents.executeJavaScript('window.api.getSettings()', true);
+    const settings = await run('window.api.getSettings()');
     check(
       'settings load and report credential-encryption support',
       settings && settings.ok === true && typeof settings.data.encryptionAvailable === 'boolean',
@@ -184,8 +232,15 @@ app.whenReady().then(async () => {
 
   // A server with dozens of databases must still be pickable: the native
   // <datalist> this replaced grew past the window with no way to scroll.
+  //
+  // The window is focused first: this suite runs after three others, and a
+  // window Windows has not given the foreground to does not always dispatch
+  // the focus event that opens the picker. That is a property of the harness,
+  // not of the app — a real click always carries one.
+  window.focus();
+  await new Promise((resolve) => setTimeout(resolve, 150));
   try {
-    const combo = await window.webContents.executeJavaScript(
+    const combo = await run(
       `(() => {
         const names = Array.from({ length: 45 }, (_, i) => ({
           name: 'database-number-' + String(i).padStart(2, '0'),
@@ -195,9 +250,18 @@ app.whenReady().then(async () => {
         const input = document.getElementById('backupDatabase');
         const previous = input.value;
         input.value = '';
+        // blur first: focus() on an already-focused field fires no event.
+        input.blur();
         input.focus();
         const popup = document.querySelector('.combo-popup:not([hidden])');
-        if (!popup) return { opened: false };
+        if (!popup) {
+          return {
+            opened: false,
+            activeElement: document.activeElement && document.activeElement.id,
+            documentHasFocus: document.hasFocus(),
+            items: state.combos.backup.count,
+          };
+        }
         const rect = popup.getBoundingClientRect();
         const result = {
           opened: true,
@@ -233,8 +297,7 @@ app.whenReady().then(async () => {
         input.dispatchEvent(new Event('input'));
         input.blur();
         return result;
-      })()`,
-      true
+      })()`
     );
 
     check('database picker opens with all 45 entries', combo.opened && combo.options === 45, JSON.stringify(combo));
@@ -270,7 +333,7 @@ app.whenReady().then(async () => {
 
   // Clicking the version opens About, and it must carry the attribution.
   try {
-    const about = await window.webContents.executeJavaScript(
+    const about = await run(
       `(async () => {
         const dialog = document.getElementById('aboutDialog');
         const before = dialog.open === true;
@@ -281,8 +344,7 @@ app.whenReady().then(async () => {
         document.getElementById('aboutClose').click();
         await new Promise((r) => setTimeout(r, 120));
         return { before, opened, closed: dialog.open !== true, text };
-      })()`,
-      true
+      })()`
     );
 
     check('the About dialog starts closed', about.before === false);
@@ -295,137 +357,206 @@ app.whenReady().then(async () => {
     );
     check(
       'it reports the version and runtime for bug reports',
-      /Version \d+\.\d+\.\d+/.test(about.text) &&
-        /Electron .+Chromium .+Node /.test(about.text),
+      /Version \d+\.\d+\.\d+/.test(about.text) && /Electron .+Chromium .+Node /.test(about.text),
       about.text.slice(0, 200)
     );
   } catch (error) {
     check('About dialog probe ran', false, error.message);
   }
 
-  // Both panels split into main (left) and advanced (right); the activity panel
-  // below must stay full width and unaffected by that split.
+  // Both working views split into a main column and a narrower side column,
+  // with the action bar pinned between the scrolling form and the log dock.
   try {
-    const layout = await window.webContents.executeJavaScript(
+    const layout = await run(
       `(() => {
-        const read = (panelId) => {
-          const panel = document.getElementById(panelId);
-          const wasActive = panel.classList.contains('is-active');
-          if (!wasActive) panel.classList.add('is-active');
-          const main = panel.querySelector('.col-main');
-          const advanced = panel.querySelector('.col-advanced');
-          const actions = panel.querySelector('.section-actions');
-          const out = main && advanced
+        const read = (viewId) => {
+          const view = document.getElementById(viewId);
+          const wasActive = view.classList.contains('is-active');
+          if (!wasActive) view.classList.add('is-active');
+          const main = view.querySelector('.grid-main');
+          const side = view.querySelector('.grid-side');
+          const out = main && side
             ? {
-                main: main.getBoundingClientRect(),
-                advanced: advanced.getBoundingClientRect(),
-                actions: actions ? actions.getBoundingClientRect().width : 0,
+                mainRight: Math.round(main.getBoundingClientRect().right),
+                mainWidth: Math.round(main.getBoundingClientRect().width),
+                sideLeft: Math.round(side.getBoundingClientRect().left),
+                sideWidth: Math.round(side.getBoundingClientRect().width),
               }
             : null;
-          if (!wasActive) panel.classList.remove('is-active');
-          if (!out) return null;
-          return {
-            mainRight: Math.round(out.main.right),
-            mainWidth: Math.round(out.main.width),
-            mainHeight: Math.round(out.main.height),
-            advLeft: Math.round(out.advanced.left),
-            advWidth: Math.round(out.advanced.width),
-            advHeight: Math.round(out.advanced.height),
-            actionsWidth: Math.round(out.actions),
-          };
+          if (!wasActive) view.classList.remove('is-active');
+          return out;
         };
+
+        const views = document.querySelector('.views');
+        const bar = document.getElementById('actionBar');
+        const dock = document.getElementById('logDock');
+        const rail = document.querySelector('.rail');
+
         return {
-          backup: read('panel-backup'),
-          restore: read('panel-restore'),
-          statusWidth: Math.round(document.querySelector('.status').getBoundingClientRect().width),
-          viewport: window.innerWidth,
+          backup: read('view-backup'),
+          restore: read('view-restore'),
+          viewsScrolls: views.scrollHeight > views.clientHeight + 1,
+          bodyScrolls: document.body.scrollHeight > document.body.clientHeight + 1,
+          barBottom: Math.round(bar.getBoundingClientRect().bottom),
+          dockTop: Math.round(dock.getBoundingClientRect().top),
+          dockBottom: Math.round(dock.getBoundingClientRect().bottom),
+          viewport: Math.round(window.innerHeight),
+          railWidth: Math.round(rail.getBoundingClientRect().width),
         };
-      })()`,
-      true
+      })()`
     );
 
     for (const name of ['backup', 'restore']) {
-      const panel = layout[name];
+      const view = layout[name];
       check(
-        `${name} panel splits into two side-by-side columns`,
-        panel !== null &&
-          panel.advLeft >= panel.mainRight - 1 &&
-          panel.mainWidth > 0 &&
-          panel.advWidth > 0,
-        panel ? `mainRight=${panel.mainRight} advLeft=${panel.advLeft}` : 'columns missing'
+        `${name} view splits into two side-by-side columns`,
+        view !== null && view.sideLeft >= view.mainRight - 1 && view.mainWidth > 0 && view.sideWidth > 0,
+        view ? `mainRight=${view.mainRight} sideLeft=${view.sideLeft}` : 'columns missing'
       );
       check(
-        `${name} advanced column is narrower than the main column`,
-        panel !== null && panel.advWidth < panel.mainWidth,
-        panel ? `main=${panel.mainWidth} advanced=${panel.advWidth}` : 'columns missing'
-      );
-      // Stretching is what lets the divider run the full height of the pair.
-      check(
-        `${name} columns share a full-height divider`,
-        panel !== null && panel.advHeight === panel.mainHeight,
-        panel ? `main=${panel.mainHeight} advanced=${panel.advHeight}` : 'columns missing'
+        `${name} side column is narrower than the main column`,
+        view !== null && view.sideWidth < view.mainWidth,
+        view ? `main=${view.mainWidth} side=${view.sideWidth}` : 'columns missing'
       );
     }
 
+    check('the sidebar holds its width', layout.railWidth === 218, `${layout.railWidth}px`);
+    // Whether the form is long enough to overflow depends on what is loaded,
+    // so only the invariant is asserted here: the page itself must never
+    // scroll, because the action bar and log dock have to stay put. That the
+    // form scrolls when it is long is covered by the pinned-bar probe below.
     check(
-      'activity panel still spans the full window width',
-      Math.abs(layout.statusWidth - layout.viewport) <= 1,
-      `status=${layout.statusWidth} viewport=${layout.viewport}`
+      'the page itself never scrolls',
+      layout.bodyScrolls === false,
+      `body scrollHeight exceeds clientHeight`
+    );
+    check(
+      'the action bar sits directly on top of the log dock',
+      Math.abs(layout.barBottom - layout.dockTop) <= 1,
+      `barBottom=${layout.barBottom} dockTop=${layout.dockTop}`
+    );
+    check(
+      'the log dock finishes at the bottom of the window',
+      Math.abs(layout.dockBottom - layout.viewport) <= 1,
+      `dockBottom=${layout.dockBottom} viewport=${layout.viewport}`
     );
   } catch (error) {
-    check('two-column layout probe ran', false, error.message);
+    check('layout probe ran', false, error.message);
   }
 
-  // The two tabs must be tellable apart at a glance, and the restore button
-  // must escalate to red for the modes that delete data.
+  // Scrolling the form must not move the action bar, which is the button the
+  // whole window is aimed at.
   try {
-    const modes = await window.webContents.executeJavaScript(
+    const pinned = await run(
+      `(() => {
+        const views = document.querySelector('.views');
+        const bar = document.getElementById('actionBar');
+        setView('restore');
+        setLogOpen(true);
+        const before = bar.getBoundingClientRect().top;
+        const scrollable = views.scrollHeight > views.clientHeight + 1;
+        views.scrollTop = views.scrollHeight;
+        const scrolled = views.scrollTop;
+        const after = bar.getBoundingClientRect().top;
+        views.scrollTop = 0;
+        setLogOpen(false);
+        setView('backup');
+        return { scrollable, scrolled, shift: Math.round(Math.abs(after - before)) };
+      })()`
+    );
+
+    check(
+      'a long form scrolls',
+      pinned.scrollable && pinned.scrolled > 0,
+      `scrollable=${pinned.scrollable} scrollTop=${pinned.scrolled}`
+    );
+    check('the action bar does not move when the form scrolls', pinned.shift === 0, `shifted ${pinned.shift}px`);
+  } catch (error) {
+    check('pinned action bar probe ran', false, error.message);
+  }
+
+  // The two working views must be tellable apart at a glance, and the restore
+  // button must escalate to red for the modes that delete data.
+  try {
+    const modes = await run(
       `(() => {
         const accentOf = (el) => getComputedStyle(el).getPropertyValue('--mode').trim();
-        const backup = document.getElementById('panel-backup');
-        const restore = document.getElementById('panel-restore');
-        const button = document.getElementById('restoreStart');
+        const backup = document.getElementById('view-backup');
+        const restore = document.getElementById('view-restore');
+        const strip = document.getElementById('flowStrip');
+        const primary = document.getElementById('actionPrimary');
+
+        setView('backup');
+        const backupFlow = strip.textContent.replace(/\\s+/g, ' ').trim();
+
+        setView('restore');
+        const restoreFlow = strip.textContent.replace(/\\s+/g, ' ').trim();
+
+        // Enough of a backup for the restore form to consider itself runnable.
+        state.inspection = {
+          manifest: null,
+          databases: [{ name: 'demo', path: 'C:\\\\demo', collections: [{ name: 'alpha', documents: 5, bytes: 100 }] }],
+        };
+        document.getElementById('restoreSource').value = 'C:\\\\demo';
+        document.getElementById('restoreUri').value = 'mongodb://127.0.0.1:27017';
+        document.getElementById('backupUri').value = 'mongodb://127.0.0.1:27017';
+        renderInspection();
 
         const escalation = {};
+        const confirmVisible = {};
+        const blockedUntilTicked = {};
         for (const value of ['keep', 'merge', 'drop', 'dropDatabase']) {
           const radio = document.querySelector('input[name="restoreMode"][value="' + value + '"]');
           radio.checked = true;
           radio.dispatchEvent(new Event('change'));
-          escalation[value] = button.classList.contains('is-destructive');
+          escalation[value] = primary.classList.contains('is-destructive');
+          confirmVisible[value] = !document.getElementById('restoreConfirmRow').classList.contains('hidden');
+          blockedUntilTicked[value] = primary.disabled;
         }
+
+        // Ticking the confirmation must be what releases the button.
+        document.getElementById('restoreDropConfirm').checked = true;
+        document.getElementById('restoreDropConfirm').dispatchEvent(new Event('change'));
+        const releasedAfterTick = !primary.disabled;
+        const confirmLabel = document.getElementById('restoreConfirmLabel').textContent;
+
         const keep = document.querySelector('input[name="restoreMode"][value="keep"]');
         keep.checked = true;
         keep.dispatchEvent(new Event('change'));
+        setView('backup');
 
         return {
           backupAccent: accentOf(backup),
           restoreAccent: accentOf(restore),
-          backupBanner: (backup.querySelector('.mode-banner') || {}).textContent || '',
-          restoreBanner: (restore.querySelector('.mode-banner') || {}).textContent || '',
+          backupFlow,
+          restoreFlow,
           escalation,
+          confirmVisible,
+          blockedUntilTicked,
+          releasedAfterTick,
+          confirmLabel,
         };
-      })()`,
-      true
+      })()`
     );
 
     check(
-      'each panel carries its own accent colour',
+      'each view carries its own accent colour',
       Boolean(modes.backupAccent) &&
         Boolean(modes.restoreAccent) &&
         modes.backupAccent !== modes.restoreAccent,
       `backup=${modes.backupAccent} restore=${modes.restoreAccent}`
     );
     check(
-      'the backup banner states data flows out and nothing changes',
-      /MongoDB/.test(modes.backupBanner) &&
-        /folder on disk/.test(modes.backupBanner) &&
-        /Nothing in your databases changes/.test(modes.backupBanner),
-      modes.backupBanner.replace(/\s+/g, ' ').trim()
+      'the backup strip states data flows out and nothing changes',
+      /MongoDB/.test(modes.backupFlow) &&
+        /folder on disk/.test(modes.backupFlow) &&
+        /Nothing in your databases changes/.test(modes.backupFlow),
+      modes.backupFlow
     );
     check(
-      'the restore banner states data flows in and the database is modified',
-      /target database is modified/.test(modes.restoreBanner),
-      modes.restoreBanner.replace(/\s+/g, ' ').trim()
+      'the restore strip states data flows in and the database is modified',
+      /target database.*is modified/.test(modes.restoreFlow),
+      modes.restoreFlow
     );
     check(
       'the restore button turns red only for the destructive modes',
@@ -435,129 +566,344 @@ app.whenReady().then(async () => {
         modes.escalation.dropDatabase === true,
       JSON.stringify(modes.escalation)
     );
+    check(
+      'the confirmation strip appears only for the destructive modes',
+      modes.confirmVisible.keep === false &&
+        modes.confirmVisible.merge === false &&
+        modes.confirmVisible.drop === true &&
+        modes.confirmVisible.dropDatabase === true,
+      JSON.stringify(modes.confirmVisible)
+    );
+    check(
+      'a destructive restore is blocked until the confirmation is ticked',
+      modes.blockedUntilTicked.keep === false &&
+        modes.blockedUntilTicked.drop === true &&
+        modes.blockedUntilTicked.dropDatabase === true &&
+        modes.releasedAfterTick === true,
+      JSON.stringify(modes.blockedUntilTicked) + ` released=${modes.releasedAfterTick}`
+    );
+    check(
+      'the confirmation names the database it is about to delete',
+      /will be deleted first/.test(modes.confirmLabel),
+      modes.confirmLabel
+    );
   } catch (error) {
     check('mode identity probe ran', false, error.message);
   }
 
-  // Each column scrolls on its own, and the primary action holds one position
-  // directly above the activity panel no matter how far a column is scrolled.
+  // Theme is a real preference, not just a class name.
   try {
-    const pinned = await window.webContents.executeJavaScript(
+    const theme = await run(
       `(() => {
-        const backup = document.getElementById('panel-backup');
-        const panel = document.getElementById('panel-restore');
-        backup.classList.remove('is-active');
-        panel.classList.add('is-active');
-        // Expanding the activity panel squeezes the form, guaranteeing overflow.
-        document.body.classList.add('status-open');
-
-        const main = panel.querySelector('.col-main');
-        const advanced = panel.querySelector('.col-advanced');
-        const actions = panel.querySelector('.section-actions');
-        const status = document.querySelector('.status');
-        const content = document.querySelector('.content');
-
-        const before = actions.getBoundingClientRect();
-        const scrollable = main.scrollHeight > main.clientHeight + 1;
-        main.scrollTop = main.scrollHeight;
-        const scrolled = main.scrollTop;
-        const advUnmoved = advanced.scrollTop === 0;
-        const after = actions.getBoundingClientRect();
-
-        const result = {
-          scrollable,
-          scrolled,
-          advUnmoved,
-          actionsShift: Math.round(Math.abs(after.top - before.top)),
-          actionsBottom: Math.round(after.bottom),
-          statusTop: Math.round(status.getBoundingClientRect().top),
-          outerScrolls: content.scrollHeight > content.clientHeight + 1,
-          columnsSeparate: main !== advanced,
+        const bg = () => getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+        const titlebar = () =>
+          getComputedStyle(document.querySelector('.titlebar')).backgroundColor;
+        document.getElementById('themeLight').click();
+        const light = { attr: document.documentElement.getAttribute('data-theme'), bg: bg(), titlebar: titlebar() };
+        document.getElementById('themeDark').click();
+        const dark = { attr: document.documentElement.getAttribute('data-theme'), bg: bg(), titlebar: titlebar() };
+        return {
+          light,
+          dark,
+          savedPref: state.settings.prefs.theme,
+          activeButton: document.getElementById('themeDark').classList.contains('is-active'),
         };
-
-        main.scrollTop = 0;
-        document.body.classList.remove('status-open');
-        panel.classList.remove('is-active');
-        backup.classList.add('is-active');
-        return result;
-      })()`,
-      true
+      })()`
     );
 
     check(
-      'a long column scrolls on its own',
-      pinned.scrollable && pinned.scrolled > 0,
-      `scrollable=${pinned.scrollable} scrollTop=${pinned.scrolled}`
+      'the light and dark themes really repaint',
+      theme.light.attr === 'light' &&
+        theme.dark.attr === 'dark' &&
+        theme.light.bg !== theme.dark.bg &&
+        theme.light.titlebar !== theme.dark.titlebar,
+      `light=${theme.light.bg}/${theme.light.titlebar} dark=${theme.dark.bg}/${theme.dark.titlebar}`
     );
     check(
-      'scrolling one column leaves the other alone',
-      pinned.advUnmoved === true && pinned.columnsSeparate
-    );
-    check(
-      'the form frame itself never scrolls',
-      pinned.outerScrolls === false,
-      `content overflows=${pinned.outerScrolls}`
-    );
-    check(
-      'the action bar does not move when a column scrolls',
-      pinned.actionsShift === 0,
-      `shifted ${pinned.actionsShift}px`
-    );
-    check(
-      'the action bar sits directly on top of the activity panel',
-      Math.abs(pinned.actionsBottom - pinned.statusTop) <= 1,
-      `actionsBottom=${pinned.actionsBottom} statusTop=${pinned.statusTop}`
+      'the choice is remembered and shown on the button',
+      theme.savedPref === 'dark' && theme.activeButton === true,
+      `pref=${theme.savedPref} active=${theme.activeButton}`
     );
   } catch (error) {
-    check('pinned action bar probe ran', false, error.message);
+    check('theme probe ran', false, error.message);
   }
 
-  // The expanded activity panel must fill its own height: the table and log are
-  // flex children, and without flex-grow they stop at their content and leave
-  // dead space under the last log line.
+  // The log dock collapses to a single line, and expanding it must reveal a
+  // log with real height rather than a zero-height box.
   try {
-    const panel = await window.webContents.executeJavaScript(
+    const dock = await run(
       `(() => {
-        document.body.classList.add('status-open');
-        const status = document.querySelector('.status');
-        const body = document.querySelector('.status-body');
-        const head = document.querySelector('.status-head');
-        const log = document.getElementById('log');
-        const table = document.querySelector('.table-wrap');
-        const r = {
-          statusHeight: Math.round(status.clientHeight),
-          bodyHeight: Math.round(body.clientHeight),
-          headHeight: Math.round(head.clientHeight),
-          logHeight: Math.round(log.clientHeight),
-          tableHeight: Math.round(table.clientHeight),
-          viewport: window.innerHeight,
+        setLogOpen(false);
+        const collapsed = {
+          height: Math.round(document.getElementById('log').clientHeight),
+          tail: document.getElementById('logTail').textContent,
         };
-        document.body.classList.remove('status-open');
-        return r;
-      })()`,
-      true
+        document.getElementById('logToggle').click();
+        const openHeight = Math.round(document.getElementById('log').clientHeight);
+        const openClass = document.body.classList.contains('log-open');
+        document.getElementById('logToggle').click();
+        return { collapsed, openHeight, openClass, reclosed: Math.round(document.getElementById('log').clientHeight) };
+      })()`
     );
 
-    // status = head + 2px progress track + body, so the body should claim
-    // everything the head does not.
-    const expected = panel.statusHeight - panel.headHeight - 2;
+    check('the log dock collapses to nothing', dock.collapsed.height === 0 && dock.reclosed === 0);
     check(
-      'expanded panel body fills the panel height',
-      Math.abs(panel.bodyHeight - expected) <= 2,
-      `body=${panel.bodyHeight} expected~${expected} (status=${panel.statusHeight} head=${panel.headHeight})`
+      'the collapsed dock still shows the newest line',
+      dock.collapsed.tail.length > 0,
+      dock.collapsed.tail
     );
     check(
-      'log and table both fill the body height',
-      panel.logHeight === panel.bodyHeight && panel.tableHeight === panel.bodyHeight,
-      `log=${panel.logHeight} table=${panel.tableHeight} body=${panel.bodyHeight}`
-    );
-    check(
-      'panel takes a sane share of the window',
-      panel.statusHeight > panel.viewport * 0.3 && panel.statusHeight < panel.viewport * 0.5,
-      `status=${panel.statusHeight} viewport=${panel.viewport}`
+      'expanding it reveals a readable log',
+      dock.openClass === true && dock.openHeight > 100,
+      `height=${dock.openHeight}`
     );
   } catch (error) {
-    check('expanded panel probe ran', false, error.message);
+    check('log dock probe ran', false, error.message);
+  }
+
+  // The history view is fed by the main process, and hides the action bar
+  // because there is nothing on it to run.
+  try {
+    const history = await run(
+      `(async () => {
+        setView('history');
+        await new Promise((r) => setTimeout(r, 200));
+        const barHidden = document.getElementById('actionBar').classList.contains('hidden');
+        const emptyText = document.getElementById('historyList').textContent;
+
+        // Render a run the way a finished job would.
+        state.history = [{
+          id: 'test-run', kind: 'backup', status: 'done', database: 'demo',
+          host: '127.0.0.1:27017', detail: 'gzip', folder: 'C:\\\\demo',
+          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+          durationMs: 1200, error: '',
+          totals: { collections: 1, documents: 5, bytes: 100 },
+          collections: [{ name: 'alpha', documents: 5, bytes: 100, indexes: 1, status: 'done' }],
+        }];
+        renderHistory();
+        const rows = document.querySelectorAll('.run').length;
+        const collapsed = document.querySelectorAll('.run-row').length;
+        document.querySelector('.run-head').click();
+        const expanded = document.querySelectorAll('.run-row').length;
+        const text = document.querySelector('.run').textContent.replace(/\\s+/g, ' ');
+        state.history = [];
+        state.openRun = null;
+        renderHistory();
+        setView('backup');
+        return { barHidden, emptyText, rows, collapsed, expanded, text };
+      })()`
+    );
+
+    check('the history view hides the action bar', history.barHidden === true);
+    check(
+      'an empty history explains itself',
+      /recorded here/.test(history.emptyText),
+      history.emptyText.slice(0, 90)
+    );
+    check('a recorded run renders as a row', history.rows === 1, `rows=${history.rows}`);
+    check(
+      'runs start collapsed and expand to per-collection detail',
+      history.collapsed === 0 && history.expanded === 1,
+      `collapsed=${history.collapsed} expanded=${history.expanded}`
+    );
+    check(
+      'the row names the database, the host and the outcome',
+      /demo/.test(history.text) && /127\.0\.0\.1/.test(history.text) && /Done/.test(history.text),
+      history.text.slice(0, 120)
+    );
+  } catch (error) {
+    check('history probe ran', false, error.message);
+  }
+
+  // Adding and editing connections, including the bug where "+" edited the
+  // selected connection instead of adding a second one.
+  try {
+    const conn = await run(
+      `(async () => {
+        if (!state.settings.encryptionAvailable) return { skipped: true };
+
+        const dialog = document.getElementById('connectionDialog');
+        const nameField = document.getElementById('connectionName');
+        const uriField = document.getElementById('connectionUri');
+        const deleteButton = document.getElementById('connectionDelete');
+        const settle = () => new Promise((r) => setTimeout(r, 250));
+        const snapshot = () => ({
+          open: dialog.open === true,
+          title: document.getElementById('connectionDialogTitle').textContent,
+          name: nameField.value,
+          uri: uriField.value,
+          production: document.getElementById('connectionProduction').checked,
+          deleteHidden: deleteButton.classList.contains('hidden'),
+        });
+        const save = async (name, uri, production) => {
+          nameField.value = name;
+          uriField.value = uri;
+          document.getElementById('connectionProduction').checked = Boolean(production);
+          document.getElementById('connectionSave').click();
+          await settle();
+        };
+
+        // Start from an empty list so the counts below mean something.
+        for (const profile of [...state.settings.profiles]) {
+          const result = await window.api.deleteProfile(profile.id);
+          if (result.ok) state.settings = result.data;
+        }
+        state.activeProfileId = null;
+        renderConnections();
+
+        const out = {};
+
+        // Add the first one through the dialog.
+        document.getElementById('connectionAdd').click();
+        out.addFresh = snapshot();
+        await save('Alpha', 'mongodb://127.0.0.1:27017/?alpha=1', false);
+        out.afterFirst = state.settings.profiles.map((p) => p.name);
+
+        // Select it — the state the bug needed — then press + again.
+        const alpha = state.settings.profiles.find((p) => p.name === 'Alpha');
+        state.activeProfileId = alpha.id;
+        setUri(alpha.uri, { silent: true });
+        renderConnections();
+
+        document.getElementById('connectionAdd').click();
+        out.addWithOneSelected = snapshot();
+        await save('Beta', 'mongodb://127.0.0.1:27017/?beta=1', true);
+        out.afterSecond = state.settings.profiles.map((p) => p.name).sort();
+        out.alphaSurvived = state.settings.profiles.some(
+          (p) => p.name === 'Alpha' && p.uri === 'mongodb://127.0.0.1:27017/?alpha=1'
+        );
+
+        // A duplicate name must be refused, not silently merged.
+        document.getElementById('connectionAdd').click();
+        await save('Alpha', 'mongodb://127.0.0.1:27017/?clash=1', false);
+        out.duplicate = {
+          stillOpen: dialog.open === true,
+          message: document.getElementById('connectionStatus').textContent,
+          count: state.settings.profiles.length,
+        };
+        document.getElementById('connectionCancel').click();
+        await settle();
+
+        // The row's Edit button opens the same dialog, filled in.
+        const betaRow = [...document.querySelectorAll('.conn')].find((row) =>
+          row.textContent.includes('Beta')
+        );
+        out.betaChip = Boolean(betaRow) && Boolean(betaRow.querySelector('.conn-prod'));
+        out.betaFlagged = Boolean(betaRow) && betaRow.classList.contains('is-production');
+        betaRow.querySelector('.conn-edit').click();
+        out.editOpen = snapshot();
+        await save('Beta renamed', 'mongodb://127.0.0.1:27017/?beta=1', true);
+        out.afterEdit = state.settings.profiles.map((p) => p.name).sort();
+
+        // A connection marked production forces the in-form confirmation even
+        // in the safe restore mode.
+        setUri('mongodb://127.0.0.1:27017/?beta=1', { silent: true });
+        setView('restore');
+        const keep = document.querySelector('input[name=\"restoreMode\"][value=\"keep\"]');
+        keep.checked = true;
+        keep.dispatchEvent(new Event('change'));
+        out.production = {
+          detected: isProductionConnection(),
+          confirmShown: !document.getElementById('restoreConfirmRow').classList.contains('hidden'),
+          label: document.getElementById('connectionStatus') && document.getElementById('restoreConfirmLabel').textContent,
+          blocked: document.getElementById('actionPrimary').disabled,
+        };
+
+        // And not for an ordinary one.
+        setUri('mongodb://127.0.0.1:27017/?alpha=1', { silent: true });
+        keep.dispatchEvent(new Event('change'));
+        out.ordinary = {
+          detected: isProductionConnection(),
+          confirmShown: !document.getElementById('restoreConfirmRow').classList.contains('hidden'),
+        };
+
+        setView('backup');
+        return out;
+      })()`
+    );
+
+    if (conn.skipped) {
+      console.log('  SKIPPED  credential encryption unavailable, cannot test connections');
+    } else {
+      check(
+        'the + button opens an empty New connection dialog',
+        conn.addFresh.open === true &&
+          conn.addFresh.title === 'New connection' &&
+          conn.addFresh.name === '' &&
+          conn.addFresh.deleteHidden === true,
+        JSON.stringify(conn.addFresh)
+      );
+      check(
+        'saving from the dialog adds the connection',
+        JSON.stringify(conn.afterFirst) === JSON.stringify(['Alpha']),
+        JSON.stringify(conn.afterFirst)
+      );
+      // The reported bug: + with a connection selected renamed that one.
+      check(
+        '+ stays a New connection even with one selected, and does not pre-fill it',
+        conn.addWithOneSelected.title === 'New connection' &&
+          conn.addWithOneSelected.name === '' &&
+          conn.addWithOneSelected.uri === '' &&
+          conn.addWithOneSelected.deleteHidden === true,
+        JSON.stringify(conn.addWithOneSelected)
+      );
+      check(
+        '+ with one selected adds a second connection rather than renaming it',
+        JSON.stringify(conn.afterSecond) === JSON.stringify(['Alpha', 'Beta']) &&
+          conn.alphaSurvived === true,
+        JSON.stringify(conn.afterSecond) + ` alphaIntact=${conn.alphaSurvived}`
+      );
+      check(
+        'a duplicate name is refused instead of overwriting',
+        conn.duplicate.stillOpen === true &&
+          /already exists/.test(conn.duplicate.message) &&
+          conn.duplicate.count === 2,
+        JSON.stringify(conn.duplicate)
+      );
+      check(
+        'the row Edit button opens the dialog filled in, with Delete offered',
+        conn.editOpen.title === 'Edit connection' &&
+          conn.editOpen.name === 'Beta' &&
+          conn.editOpen.uri === 'mongodb://127.0.0.1:27017/?beta=1' &&
+          conn.editOpen.production === true &&
+          conn.editOpen.deleteHidden === false,
+        JSON.stringify(conn.editOpen)
+      );
+      check(
+        'editing renames in place rather than adding a third',
+        JSON.stringify(conn.afterEdit) === JSON.stringify(['Alpha', 'Beta renamed']),
+        JSON.stringify(conn.afterEdit)
+      );
+      check(
+        'a production connection is flagged in the sidebar',
+        conn.betaChip === true && conn.betaFlagged === true,
+        `chip=${conn.betaChip} flagged=${conn.betaFlagged}`
+      );
+      check(
+        'production forces the in-form confirmation even in the safe restore mode',
+        conn.production.detected === true &&
+          conn.production.confirmShown === true &&
+          /marked production/.test(conn.production.label || '') &&
+          conn.production.blocked === true,
+        JSON.stringify(conn.production)
+      );
+      check(
+        'an ordinary connection does not demand it',
+        conn.ordinary.detected === false && conn.ordinary.confirmShown === false,
+        JSON.stringify(conn.ordinary)
+      );
+
+      // Nothing that reaches disk may carry a connection string.
+      const settingsFile = path.join(PROFILE_DIR, 'settings.json');
+      const raw = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, 'utf8') : '';
+      check(
+        'saved connection strings are encrypted on disk, never plain text',
+        raw.length > 0 && raw.includes('Alpha') && !raw.includes('127.0.0.1:27017'),
+        raw.slice(0, 200)
+      );
+    }
+  } catch (error) {
+    check('connection dialog probe ran', false, error.message);
   }
 
   check(

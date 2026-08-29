@@ -3,8 +3,10 @@
 A Windows desktop app for backing up and restoring MongoDB databases. Paste a
 connection string, name a database, click a button.
 
-- **Backup** — MongoDB URI + source database → a folder on disk.
-- **Restore** — MongoDB URI + a backup folder → target database.
+- **Back up** — MongoDB URI + source database → a folder on disk.
+- **Restore** — a backup folder → target database, with a dry run first if you
+  want to see what it would do.
+- **History** — every run it has made, including the ones that failed.
 
 No `mongodump.exe` or `mongorestore.exe` required. The app talks to MongoDB
 directly through the official Node.js driver, but writes the **same directory
@@ -14,25 +16,48 @@ dumps produced by those tools can be restored here.
 Works with local servers, replica sets, sharded clusters, and MongoDB Atlas
 (`mongodb://` and `mongodb+srv://`).
 
-![Backing up a database, with per-collection progress and an activity log](docs/screenshots/backup.png)
+![A finished backup: per-collection progress in the Collections card, and the run's activity log along the bottom](docs/screenshots/backup.png)
 
 ---
 
 ## Screenshots
 
-**Restoring** — the tab carries its own colour and states the direction of travel,
-because running a restore while believing you are running a backup is the one
-mistake worth designing against. Four modes decide what happens to existing data;
-the two that delete turn the button red and confirm against the target name.
+**Restoring.** The view carries its own colour and states the direction of
+travel, because running a restore while believing you are running a backup is
+the one mistake worth designing against. Four modes decide what happens to
+existing data; the two that delete turn the button red, need a confirmation
+ticked in the form, and confirm again against the target name.
 
-![The restore tab, showing the four modes for existing data](docs/screenshots/restore.png)
+![The Restore view: connection, the backup being restored, the target database marked as one that already exists, and the four modes](docs/screenshots/restore.png)
 
-**Picking a database** — type to filter. Opening the list always shows every
+**Dry run.** Before writing anything, the app reads the live target and reports
+what each collection would actually get. The destructive modes are exact —
+everything present is deleted, so the count is simply what is there now. The
+safe modes are given as bounds, because how many of the backup's documents
+already exist depends on their `_id`s, and the preview says so rather than
+inventing precision it does not have.
+
+![A dry run listing each collection with its document count in the backup, its count in the target, and the outcome](docs/screenshots/dry-run.png)
+
+**History.** Expand a run for its per-collection detail, open its folder, or
+load a backup straight back into the restore form.
+
+![The History view with a backup and a restore, one expanded to show each collection](docs/screenshots/history.png)
+
+**Connections.** One dialog adds and edits them — name, URI, an optional
+default database, and a **Test** that tries the URI without adopting it as the
+app's connection. A connection can be marked **production**, which flags it red
+in the sidebar and makes every restore into it ask for confirmation in the form.
+
+![The connection dialog, with the production option ticked, over a sidebar showing three saved connections](docs/screenshots/connection-dialog.png)
+
+**Picking a database.** Type to filter. Opening the list always shows every
 database with the current one ticked, so a chosen name never hides the rest.
 
-![The database picker, filtered by typing](docs/screenshots/database-picker.png)
+![The database picker open over the form, filtered by typing](docs/screenshots/database-picker.png)
 
-**Light theme**, following the Windows setting.
+**Light theme.** Starts from the Windows setting; the switch in the sidebar
+overrides it and is remembered.
 
 ![The same screen in the light theme](docs/screenshots/light-theme.png)
 
@@ -82,52 +107,97 @@ Rasterising is done by Chromium and the `.ico` container is written directly, so
 no image libraries are needed. The generator validates what it wrote and fails
 loudly rather than shipping a malformed icon.
 
+### Fonts
+
+Manrope and Space Mono are bundled in `src/renderer/fonts/` rather than fetched
+from Google Fonts: the renderer runs under a Content-Security-Policy that allows
+`font-src 'self'` only, and a desktop tool has to render correctly offline. Both
+are SIL OFL 1.1 — see [`fonts/NOTICE.md`](src/renderer/fonts/NOTICE.md).
+
 ---
 
-## Telling the two modes apart
+## Telling the two directions apart
 
 The costly mistake this app can make is running a restore while you believe you
 are running a backup — the forms look alike, and in the safe restore mode the
-damage is invisible until it isn't. So each mode carries its own identity:
+damage is invisible until it isn't. So each direction carries its own identity:
 
-| | Backup | Restore |
+| | Back up | Restore |
 | --- | --- | --- |
 | Accent | green | amber |
-| Banner | `MongoDB → folder on disk` | `folder on disk → MongoDB` |
-| States | "Nothing in your databases changes" | "The target database is modified" |
-| Primary button | plain ink | amber, turning **red** for Replace and Drop database |
+| Strip along the top | `MongoDB → folder on disk` | `folder on disk → MongoDB` |
+| States | "Nothing in your databases changes" | "The target database on *host* is modified" |
+| Primary button | accent | accent, turning **red** for Replace and Drop database |
 
-The tab underline, the banner along the top of the panel, and the rule above the
-action bar all take the mode's colour, so the mode is readable from the corner of
-your eye rather than only from the heading.
+The strip, the collection progress bars, and the rule above the action bar all
+take that colour, so the direction is readable from the corner of your eye
+rather than only from the heading.
 
 **Both actions confirm before running.** The dialog names the direction
-explicitly — a restore says *"This writes into the database. It does not create a
-backup."* — which is the sentence that catches the mistake. It also names the
+explicitly — a restore says *"This writes into the database. It does not create
+a backup."* — which is the sentence that catches the mistake. It also names the
 target database, the server host (credentials stripped), and what the chosen
-restore mode will do to existing data.
+mode will do to existing data. The two destructive modes additionally require a
+checkbox ticked in the form, and that checkbox names the database it is about to
+empty.
+
+---
+
+## One connection at a time
+
+The sidebar holds the saved connections, and the URI on the Back up and Restore
+views is the same connection. Choosing a saved one connects and lists its
+databases in a single handshake — which matters on Atlas, where each connect
+carries an SRV lookup and a TLS negotiation.
+
+Backing up from one server and restoring into another therefore means switching
+connection between the two, rather than keeping two URIs filled in at once. In
+exchange, the server a restore is about to write to is never a stale value from
+an earlier session: it is stated on the connection card, in the strip along the
+top of the view, and in the confirmation dialog.
+
+**+** adds a connection, and the pencil on a row edits it — both open the same
+dialog: name, URI, an optional default database, and **Test**, which tries the
+URI without adopting it as the app's connection. Editing also offers **Delete**.
+
+### Marking a connection as production
+
+The dialog has a **Treat as production** option. A connection marked that way is
+flagged red in the sidebar, and *every* restore into it has to be confirmed in
+the form — not only the modes that delete data. The safe modes are safe about
+existing documents, not about which server they run against, and pointing at the
+wrong one is the mistake this app exists to make hard.
+
+### Where they are kept
+
+Connection strings contain credentials, so they are encrypted at rest with
+Windows DPAPI via Electron's `safeStorage` — readable only by your Windows user
+account. If the OS keystore is unavailable the app refuses to save rather than
+writing credentials in plain text.
+
+Everything is stored in `%APPDATA%\MongoDB Backup and Restore\settings.json`.
+Delete that file to reset the app.
 
 ---
 
 ## Backing up
 
-1. Paste the **MongoDB URI**. Click **Test connection** to confirm it works —
-   the app reports the server version and whether it is a standalone, replica
+1. Paste the **MongoDB URI**, or pick a saved connection from the sidebar.
+   **Test** reports the server version and whether it is a standalone, replica
    set, or sharded cluster.
-2. Enter the **database** to back up. **Load** lists what the account can see in
-   a picker you can type into to filter — servers with dozens of similarly named
-   databases stay navigable. Opening the picker always shows every database, with
-   the current one ticked; filtering happens only while you type, so a chosen
-   name never hides the rest of the list.
-3. Choose where to save it. Every run creates its own timestamped subfolder
+2. Choose the **database**. **Browse** opens a picker you can type into to
+   filter — servers with dozens of similarly named databases stay navigable.
+   Opening it always shows every database, with the current one ticked;
+   filtering happens only while you type, so a chosen name never hides the rest.
+3. Choose where to save it. The card shows the exact folder this run will
+   create — every run gets its own timestamped subfolder
    (`my_database_2026-08-18_18-30-00`), so a backup never overwrites an earlier
    one.
 4. **Start backup.**
 
-The **Advanced** column on the right holds gzip compression and the collection
-picker — always visible, nothing hidden behind a disclosure. Choosing a database
-loads its collections there automatically; **Load collection list** re-reads them
-if the database has changed underneath you.
+Choosing a database loads its collections into the **Collections** card
+automatically, all selected. Untick any you do not want; those rows double as
+the progress display while the backup runs.
 
 ### What a backup folder contains
 
@@ -157,29 +227,29 @@ mongorestore --uri "mongodb://..." --db target_name --dir "path\to\my_database_2
 
 ## Restoring
 
-1. Paste the **MongoDB URI** for the destination. The account needs write
-   access.
-2. Choose the **backup folder**. The app reads it and reports what it found —
-   source database, collection count, document count, and when it was taken.
+1. Make sure the **connection** is the server you mean to write to. The account
+   needs write access.
+2. Choose the **backup folder**. The app reads it and reports the source
+   database, how much is in it, and when it was taken.
 3. Enter the **target database**. It defaults to the original name, but any name
-   works — that is how you clone a database or restore into a staging copy.
-4. Pick what should happen **if the target already has data**, then
-   **Start restore**.
+   works — that is how you clone a database or restore into a staging copy. It
+   is labelled *exists* or *will be created* as you type.
+4. Pick what should happen **if the target already has data**.
+5. **Preview (dry run)** to see what that would do, then **Start restore**.
 
 ### The four restore modes
 
 | Mode | What it does |
 | --- | --- |
-| **Keep** (default) | Inserts documents that are not there yet. Documents whose `_id` already exists are skipped and counted, never overwritten. Nothing is deleted. |
+| **Keep it** (default) | Inserts documents that are not there yet. Documents whose `_id` already exists are skipped and counted, never overwritten. Nothing is deleted. |
 | **Merge** | Replaces documents that share an `_id`, inserts the rest. Use it to roll a database back to the backup's contents without dropping anything. |
 | **Replace** | Drops each collection in the backup before restoring it. Collections *not* in the backup are left alone. |
-| **Drop database** | Drops the entire target database first, including collections not in the backup. |
+| **Drop the whole database** | Drops the entire target database first, including collections not in the backup. |
 
-The two destructive modes ask for confirmation, naming the exact database, before
-anything is deleted.
+The two destructive modes need the in-form confirmation ticked and then confirm
+again in a dialog naming the exact database.
 
-The **Advanced** column on the right holds index creation, document-validation
-bypass, and the collection picker.
+The **Advanced** card holds index creation and the document-validation bypass.
 
 The restore also reads folders produced by `mongodump`, whether the folder
 contains the `.bson` files directly or is a dump root with one subfolder per
@@ -187,27 +257,21 @@ database.
 
 ---
 
-## Saved connections
+## History
 
-Click **Save** next to the connection dropdown to store a URI under a name.
-Selecting a saved connection afterwards connects straight away and fills the
-database list — no need to press **Test connection** or **Load**. Both answers
-come from a single handshake, which matters on Atlas where each connect carries
-an SRV lookup and a TLS negotiation.
+Every run is recorded — completed, failed, or stopped — with how far it got.
+Expand one for its per-collection detail, **Open folder** to see what it wrote,
+or **Restore this** to load a backup straight into the restore form.
 
-Connection strings contain credentials, so they are encrypted at rest with
-Windows DPAPI via Electron's `safeStorage` — readable only by your Windows user
-account. If the OS keystore is unavailable the app refuses to save rather than
-writing credentials in plain text.
-
-Everything is stored in `%APPDATA%\MongoDB Backup and Restore\settings.json`.
-Delete that file to reset the app.
+Runs are kept in `%APPDATA%\MongoDB Backup and Restore\history.json`, capped at
+the last 60. It records the **host** a run talked to but never the connection
+string, so the file cannot be used to reach a server.
 
 ---
 
 ## About
 
-Click the version in the title bar for the About dialog: app version, the
+Click the version in the sidebar for the About dialog: app version, the
 Electron/Chromium/Node build it is running on, and **Copy details** to put all of
 that on the clipboard for a bug report.
 
@@ -230,11 +294,11 @@ default; pass a URI as an argument to point elsewhere):
 | `npm run test:engines` | Seeds a database covering every awkward BSON type, backs it up, restores it, and compares the **raw BSON bytes** of every document plus index definitions — plain and gzipped. Also covers duplicate handling, merge mode, renamed targets, filename escaping for collection names that are illegal as Windows filenames, capped collections, views, and input validation. |
 | `npm run test:srv` | Covers the Atlas SRV/DNS fallback: seed-list URI composition, TXT-option precedence, the rule that a TXT record cannot downgrade TLS, rejection of SRV hosts outside the cluster domain, and DNS-error classification. Pass a cluster hostname (`npm run test:srv -- cluster0.xxx.mongodb.net`) to also run a live check that black-holes the system resolver and confirms the fallback still resolves the cluster. |
 | `npm run test:compat` | Round-trips against the official tools: our backup → `mongorestore`, and `mongodump` → our restore. Skipped with a notice if the CLI tools are not on PATH. |
-| `npm run test:ui` | Boots the real app under Electron and asserts the preload bridge, DOM wiring, and IPC round trips work, with no renderer console errors. Also checks the database picker stays height-capped, scrollable and filterable with 45 databases loaded; that both panels split into main/advanced columns sharing a full-height divider while the activity panel stays full width; and that the expanded activity panel fills its own height. |
-| `npm run test:e2e` | Fills in the actual form fields and clicks the actual buttons, then verifies the data landed in MongoDB — covering the job-event plumbing behind the progress table and status bar. Also checks that committing a database name auto-loads its collections into the Advanced column, all selected. |
+| `npm run test:ui` | Boots the real app under Electron and asserts the preload bridge, DOM wiring, and IPC round trips work, with no renderer console errors. Also covers the frameless window's own title bar and drag regions, that the bundled fonts really loaded under the CSP, that both themes repaint, that the picker stays height-capped and filterable with 45 databases, that the action bar stays pinned above the log dock while the form scrolls, that a destructive restore stays blocked until its confirmation is ticked, and that a saved connection string is never written to disk in plain text. The connection dialog gets its own run through: **+** opens empty even with a connection selected and adds a second rather than renaming it, a duplicate name is refused, the row's pencil opens the dialog filled in and renames in place, and a production connection forces the confirmation even in the safe mode. |
+| `npm run test:e2e` | Fills in the actual form fields and clicks the actual buttons, then verifies the data landed in MongoDB. Covers the sidebar connecting on one click, a chosen database auto-loading its collections, per-collection progress reaching completion, a dry run reporting the target's real counts and writing nothing, and both runs landing in History with the host but no connection string — checked against the file on disk. |
 
 The UI suites run against a throwaway Electron profile, so they never touch your
-saved connections or preferences.
+saved connections, preferences, or history.
 
 ---
 
@@ -257,111 +321,3 @@ Then cut the release:
 ```bash
 npm run release
 ```
-
-Order matters: `npm version` tags the commit it creates, so anything committed
-afterwards sits outside the tag. If that happens the release script says so and
-tells you whether the tag is safe to drop and recreate.
-
-That runs preflight checks (clean tree, tag free, changelog entry present), the
-full test suite, and the Windows build; then tags, pushes, and publishes a GitHub
-release with both executables attached and the changelog section as its notes.
-
-Check what it would do without changing anything:
-
-```bash
-npm run release -- --dry-run
-```
-
-The GitHub step uses the [`gh` CLI](https://cli.github.com). Without it the local
-steps still run and the manual instructions are printed instead — install it once
-with `winget install GitHub.cli` to automate the last step.
-
-Each release carries three things:
-
-| Asset | Source |
-| --- | --- |
-| `MongoDB Backup and Restore Setup <version>.exe` | uploaded by `npm run release` |
-| `MongoDB-Backup-Restore-<version>-portable.exe` | uploaded by `npm run release` |
-| Source code (zip / tar.gz) | attached by GitHub from the tag |
-
-The release notes are assembled from the changelog section for that version, with
-a downloads table and the SHA-256 of each executable prepended — the builds are
-unsigned, so a published digest is the only way to check a download is the file
-that was built.
-
-The executables are not committed: at 94 MB each they belong on a release, not in
-git history. `release/` is ignored for that reason.
-
----
-
-## Troubleshooting
-
-### `querySrv ECONNREFUSED` / `querySrv ETIMEOUT` on an Atlas URI
-
-This is a **DNS failure, not a MongoDB failure**. An `mongodb+srv://` string
-carries only the cluster name, so the client must first ask DNS for the cluster's
-SRV record. If your DNS server refuses that query — common on consumer routers,
-captive portals, VPNs, and locked-down corporate DNS — the connection fails
-before MongoDB is ever contacted. It is often intermittent.
-
-The app handles this itself: when an SRV lookup fails it re-resolves the cluster
-through public DNS (1.1.1.1, then 8.8.8.8), converts the URI to a standard
-seed-list connection, and retries. The activity log records when this happens.
-Resolved hosts are checked to be inside the cluster's own domain, so a bad
-resolver cannot redirect the connection somewhere else.
-
-If both fail, the network is blocking DNS more thoroughly. Use the standard
-connection string instead, which needs no SRV lookup: in Atlas open
-**Connect → Drivers**, set the driver version to **"Node.js 2.2.12 or later"**,
-and copy the `mongodb://` string it shows — it lists the cluster hosts directly.
-
-To check DNS from the command line:
-
-```bash
-nslookup -type=SRV _mongodb._tcp.<your-cluster>.mongodb.net
-```
-
-### `Authentication failed`
-
-The username or password is wrong, or the user is not authorised on the database
-you named. Note that a password containing `@`, `:`, `/`, or `?` must be
-percent-encoded in the URI (`@` becomes `%40`).
-
-### Atlas connects from one network but not another
-
-Atlas only accepts connections from IPs on its access list
-(**Network Access → IP Access List**). A different office, home network, or VPN
-exit means a different IP.
-
-## Notes and limits
-
-- **Point-in-time consistency.** Like `mongodump`, a backup is not a snapshot:
-  collections are read one after another, so writes landing mid-run can leave
-  related collections slightly out of step. For a consistent backup of a live
-  system, run it against a secondary or during a quiet period.
-- **Users, roles, and server config** are not backed up — only the database's
-  collections, indexes, and views.
-- **Cancelling** stops at the next document batch. Files already written are
-  left in place, and a cancelled restore leaves partially written collections;
-  re-run it in Replace mode for a clean result.
-- **Large collections** stream through in batches and never load a whole
-  collection into memory, so file size is bounded by disk, not RAM.
-
-## Layout
-
-```
-src/main/       Electron main process
-  main.js       window, IPC handlers, job lifecycle
-  backup.js     backup engine
-  restore.js    restore engine + backup-folder inspection
-  bsonio.js     streaming BSON reader/writer, filename escaping
-  mongo.js      connection handling, URI validation and redaction
-  settings.js   preferences + encrypted connection storage
-  preload.js    the only bridge exposed to the UI
-src/renderer/   the window itself (plain HTML/CSS/JS, no build step)
-scripts/        the four test suites
-```
-
-The renderer runs with `contextIsolation` on, no Node integration, and a strict
-Content-Security-Policy; it reaches the outside world only through the named
-channels in `preload.js`.

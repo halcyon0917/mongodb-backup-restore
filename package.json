@@ -1,6 +1,6 @@
 {
   "name": "mongodb-backup-restore",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Windows desktop app for backing up and restoring MongoDB databases",
   "main": "src/main/main.js",
   "author": "Adrian Dela Cruz",

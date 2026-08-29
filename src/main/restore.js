@@ -332,6 +332,109 @@ async function restoreIndexes(db, collection, metadata, ctx) {
 }
 
 /** Restore one dumped database into the target database. */
+/**
+ * Resolve the collections a request will act on, shared by preview and restore.
+ *
+ * Views sort last: a view can reference collections that are in the same dump,
+ * so the things it selects from have to exist before it is created.
+ */
+function planCollections(source, includeCollections) {
+  let collections = source.collections;
+  if (Array.isArray(includeCollections) && includeCollections.length > 0) {
+    const wanted = new Set(includeCollections);
+    collections = collections.filter((collection) => wanted.has(collection.name));
+  }
+  return [...collections].sort((a, b) => {
+    const aView = a.type === 'view' ? 1 : 0;
+    const bView = b.type === 'view' ? 1 : 0;
+    return aView - bView || a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Report what a restore would do, without writing anything.
+ *
+ * Only counts are gathered, so this is cheap and safe to run against a live
+ * database. Where a number cannot be known without reading every document it is
+ * reported as unknown rather than guessed: how many of the backup's documents
+ * already exist in the target depends on their _ids, and pretending otherwise
+ * would make a preview that lies about the safe modes.
+ *
+ * Exact for the destructive modes (everything present is deleted, so the
+ * deletion count is simply what is there now) and bounded for the others.
+ */
+async function previewRestore(request) {
+  const uri = validateUri(request.uri);
+  const targetDatabase = validateDatabaseName(request.targetDatabase, 'Target database');
+
+  const inspection = await inspectBackup(request.sourceDir);
+  const sourceName = request.sourceDatabase || inspection.databases[0].name;
+  const source =
+    inspection.databases.find((database) => database.name === sourceName) ||
+    inspection.databases[0];
+
+  const collections = planCollections(source, request.includeCollections);
+  if (collections.length === 0) {
+    throw new Error('No collections selected to restore.');
+  }
+
+  const mode = request.dropDatabase
+    ? 'dropDatabase'
+    : request.drop
+      ? 'drop'
+      : request.writeMode === 'upsert'
+        ? 'merge'
+        : 'keep';
+
+  return withClient(uri, async (client) => {
+    const db = client.db(targetDatabase);
+
+    const existingNames = await db
+      .listCollections({}, { nameOnly: true })
+      .toArray()
+      .then((entries) => entries.map((entry) => entry.name))
+      .catch(() => []);
+    const existing = new Set(existingNames);
+
+    const rows = [];
+    for (const collection of collections) {
+      const present = existing.has(collection.name);
+      const inTarget = present
+        ? await db.collection(collection.name).countDocuments().catch(() => null)
+        : 0;
+      rows.push({
+        name: collection.name,
+        type: collection.type || 'collection',
+        inBackup: typeof collection.documents === 'number' ? collection.documents : null,
+        inTarget,
+        exists: present,
+      });
+    }
+
+    // Only "drop the whole database" reaches collections the backup does not
+    // mention, and those are the ones nobody expects to lose.
+    const planned = new Set(collections.map((collection) => collection.name));
+    const untouched = [];
+    if (mode === 'dropDatabase') {
+      for (const name of existingNames) {
+        if (planned.has(name)) continue;
+        const documents = await db.collection(name).countDocuments().catch(() => null);
+        untouched.push({ name, inTarget: documents });
+      }
+    }
+
+    return {
+      mode,
+      targetDatabase,
+      sourceDatabase: source.name,
+      sourceFolder: source.path,
+      targetExists: existingNames.length > 0,
+      rows,
+      collateralCollections: untouched,
+    };
+  });
+}
+
 async function runRestore(request, ctx) {
   const startedAt = Date.now();
   const uri = validateUri(request.uri);
@@ -355,21 +458,10 @@ async function runRestore(request, ctx) {
       : null,
   };
 
-  let collections = source.collections;
-  if (options.includeCollections && options.includeCollections.length > 0) {
-    const wanted = new Set(options.includeCollections);
-    collections = collections.filter((collection) => wanted.has(collection.name));
-  }
+  const collections = planCollections(source, options.includeCollections);
   if (collections.length === 0) {
     throw new Error('No collections selected to restore.');
   }
-
-  // Views are created last: a view can reference collections in the same dump.
-  collections = [...collections].sort((a, b) => {
-    const aView = a.type === 'view' ? 1 : 0;
-    const bView = b.type === 'view' ? 1 : 0;
-    return aView - bView || a.name.localeCompare(b.name);
-  });
 
   const onNotice = (message) => ctx.log('warn', message);
 
@@ -515,4 +607,4 @@ async function runRestore(request, ctx) {
   }, { onNotice });
 }
 
-module.exports = { inspectBackup, runRestore };
+module.exports = { inspectBackup, previewRestore, runRestore };

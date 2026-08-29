@@ -10,42 +10,565 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <header class="app-bar">
-      <div class="brand">
-        <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 2c2.6 3.2 4.4 6.4 4.4 9.7 0 3.6-2 6.6-4.4 8.3V2Z" fill="currentColor" />
-          <path
-            d="M12 2C9.4 5.2 7.6 8.4 7.6 11.7c0 3.6 2 6.6 4.4 8.3V2Z"
-            fill="currentColor"
-            opacity=".5"
-          />
-          <rect x="11.4" y="19" width="1.2" height="3" rx=".6" fill="currentColor" opacity=".7" />
-        </svg>
-        <h1>MongoDB Backup <span class="dim">&amp;</span> Restore</h1>
-      </div>
-
-      <nav class="tabs" role="tablist">
-        <button class="tab is-active" role="tab" data-tab="backup" aria-selected="true">
-          Backup
+    <!-- ───────────────────────────── Title bar ─────────────────────────────
+         The window is frameless, so this is the real title bar: draggable
+         through -webkit-app-region and carrying its own window buttons. -->
+    <header class="titlebar">
+      <svg class="titlebar-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <ellipse cx="8" cy="3.6" rx="5.4" ry="2.1" stroke="currentColor" stroke-width="1.3" />
+        <path
+          d="M2.6 3.6v8.8c0 1.16 2.42 2.1 5.4 2.1s5.4-.94 5.4-2.1V3.6"
+          stroke="currentColor"
+          stroke-width="1.3"
+        />
+        <path d="M2.6 8c0 1.16 2.42 2.1 5.4 2.1s5.4-.94 5.4-2.1" stroke="currentColor" stroke-width="1.3" />
+      </svg>
+      <span class="titlebar-name">MongoDB Backup &amp; Restore</span>
+      <span class="spacer"></span>
+      <div class="window-controls">
+        <button class="window-button" id="winMinimize" title="Minimise" aria-label="Minimise">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5h8" stroke="currentColor" stroke-width="1" /></svg>
         </button>
-        <button class="tab" role="tab" data-tab="restore" aria-selected="false">Restore</button>
-      </nav>
-
-      <button id="appVersion" class="version" title="About this app">&nbsp;</button>
+        <button class="window-button" id="winMaximize" title="Maximise" aria-label="Maximise">
+          <svg class="icon-maximize" viewBox="0 0 10 10" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="7" height="7" stroke="currentColor" stroke-width="1" fill="none" />
+          </svg>
+          <svg class="icon-restore" viewBox="0 0 10 10" aria-hidden="true">
+            <rect x="1.5" y="3" width="5.5" height="5.5" stroke="currentColor" stroke-width="1" fill="none" />
+            <path d="M3.5 3V1.5H8.5V6.5H7" stroke="currentColor" stroke-width="1" fill="none" />
+          </svg>
+        </button>
+        <button class="window-button danger" id="winClose" title="Close" aria-label="Close">
+          <svg viewBox="0 0 10 10" aria-hidden="true">
+            <path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1" />
+          </svg>
+        </button>
+      </div>
     </header>
+
+    <div class="shell">
+      <!-- ──────────────────────────── Sidebar ──────────────────────────── -->
+      <aside class="rail">
+        <nav class="rail-nav" role="tablist" aria-label="Views">
+          <button class="nav is-active" role="tab" data-view="backup" aria-selected="true">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M8 2v7.5M8 9.5L5 6.5M8 9.5l3-3M2.5 12.5h11"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span>Back up</span>
+          </button>
+          <button class="nav" role="tab" data-view="restore" aria-selected="false">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M8 10V2.5M8 2.5l-3 3M8 2.5l3 3M2.5 13h11"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span>Restore</span>
+          </button>
+          <button class="nav" role="tab" data-view="history" aria-selected="false">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="5.8" stroke="currentColor" stroke-width="1.4" />
+              <path d="M8 5v3.2l2.2 1.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+            <span>History</span>
+            <span class="spacer"></span>
+            <span class="nav-count mono" id="historyCount"></span>
+          </button>
+        </nav>
+
+        <div class="rail-section">
+          <div class="rail-section-head">
+            <span>Connections</span>
+            <span class="spacer"></span>
+            <button
+              class="rail-add"
+              id="connectionAdd"
+              title="Add a connection"
+              aria-label="Add a connection"
+            >
+              +
+            </button>
+          </div>
+          <div class="conn-list" id="connectionList"></div>
+        </div>
+
+        <span class="spacer"></span>
+
+        <div class="rail-foot">
+          <div class="theme-switch" role="group" aria-label="Theme">
+            <button class="theme-button" id="themeDark" title="Dark" aria-label="Dark theme">
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M13.2 9.6A5.6 5.6 0 016.4 2.8a5.6 5.6 0 106.8 6.8z"
+                  stroke="currentColor"
+                  stroke-width="1.3"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <button class="theme-button" id="themeLight" title="Light" aria-label="Light theme">
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="8" cy="8" r="3.1" stroke="currentColor" stroke-width="1.3" />
+                <path
+                  d="M8 1.4v1.6M8 13v1.6M1.4 8h1.6M13 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"
+                  stroke="currentColor"
+                  stroke-width="1.3"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </button>
+          </div>
+          <span class="spacer"></span>
+          <button class="version mono" id="appVersion" title="About this app">&nbsp;</button>
+        </div>
+      </aside>
+
+      <!-- ───────────────────────────── Main ───────────────────────────── -->
+      <main class="main">
+        <!-- Names the direction of travel. The two working views are the same
+             shape, and mistaking one for the other writes to a live database. -->
+        <div class="flow" id="flowStrip">
+          <span class="flow-node" id="flowFrom">MongoDB</span>
+          <svg class="flow-arrow" viewBox="0 0 16 10" fill="none" aria-hidden="true">
+            <path d="M1 5h13M11 2l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="flow-node" id="flowTo">folder on disk</span>
+          <span class="flow-divider"></span>
+          <span class="flow-desc" id="flowDesc">
+            Copies data out. Nothing in your databases changes.
+          </span>
+        </div>
+
+        <div class="views">
+          <!-- ─────────────────────────── Back up ─────────────────────────── -->
+          <section class="view is-active" id="view-backup" role="tabpanel" aria-label="Back up">
+            <div class="grid">
+              <div class="grid-main">
+                <section class="card">
+                  <header class="card-head">
+                    <h2>Source</h2>
+                    <span class="spacer"></span>
+                    <span class="conn-state" id="backupConnState" data-state="idle">Not connected</span>
+                  </header>
+                  <div class="card-body">
+                    <label class="field-label" for="backupUri">MongoDB URI</label>
+                    <div class="row">
+                      <input
+                        type="password"
+                        id="backupUri"
+                        class="mono"
+                        spellcheck="false"
+                        autocomplete="off"
+                        placeholder="mongodb+srv://user:password@cluster0.example.mongodb.net/"
+                      />
+                      <button class="btn" id="backupUriReveal" title="Show or hide the URI">Show</button>
+                      <button class="btn" id="backupTest">Test</button>
+                    </div>
+                    <p class="hint" id="backupConnStatus">
+                      Supports <code>mongodb://</code> and <code>mongodb+srv://</code> (Atlas).
+                    </p>
+
+                    <label class="field-label" for="backupDatabase">Database</label>
+                    <div class="row">
+                      <input
+                        type="text"
+                        id="backupDatabase"
+                        class="mono"
+                        spellcheck="false"
+                        autocomplete="off"
+                        placeholder="my_database"
+                      />
+                      <button class="btn with-chevron" id="backupBrowseDb">
+                        Browse
+                        <svg viewBox="0 0 10 6" fill="none" aria-hidden="true">
+                          <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                      </button>
+                    </div>
+                    <p class="hint" id="backupDbHint">Connect to list the databases on this server.</p>
+                  </div>
+                </section>
+
+                <section class="card">
+                  <header class="card-head"><h2>Destination</h2></header>
+                  <div class="card-body">
+                    <div class="row">
+                      <input
+                        type="text"
+                        id="backupOutput"
+                        class="mono"
+                        spellcheck="false"
+                        placeholder="C:\MongoDB Backups"
+                      />
+                      <button class="btn" id="backupBrowse">Browse…</button>
+                    </div>
+
+                    <div class="callout">
+                      <div class="callout-label">This run writes to</div>
+                      <div class="callout-value mono" id="backupResolved"></div>
+                    </div>
+
+                    <label class="check">
+                      <input type="checkbox" id="backupGzip" />
+                      <span class="check-text">
+                        Compress with gzip<em> — smaller files, slightly slower</em>
+                      </span>
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <div class="grid-side">
+                <section class="card">
+                  <header class="card-head">
+                    <h2>Collections</h2>
+                    <span class="spacer"></span>
+                    <button class="link" id="backupSelectAll">All</button>
+                    <button class="link dim" id="backupSelectNone">None</button>
+                  </header>
+                  <div class="collection-list" id="backupCollections">
+                    <p class="empty">Choose a database to list its collections.</p>
+                  </div>
+                  <footer class="card-foot" id="backupCollectionsFooter">
+                    Everything in the database is backed up unless you narrow it down here.
+                  </footer>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <!-- ─────────────────────────── Restore ─────────────────────────── -->
+          <section class="view" id="view-restore" role="tabpanel" aria-label="Restore">
+            <div class="grid">
+              <div class="grid-main">
+                <section class="card">
+                  <header class="card-head">
+                    <h2>Restore into</h2>
+                    <span class="spacer"></span>
+                    <span class="conn-state" id="restoreConnState" data-state="idle">Not connected</span>
+                  </header>
+                  <div class="card-body">
+                    <label class="field-label" for="restoreUri">MongoDB URI</label>
+                    <div class="row">
+                      <input
+                        type="password"
+                        id="restoreUri"
+                        class="mono"
+                        spellcheck="false"
+                        autocomplete="off"
+                        placeholder="mongodb+srv://user:password@cluster0.example.mongodb.net/"
+                      />
+                      <button class="btn" id="restoreUriReveal" title="Show or hide the URI">Show</button>
+                      <button class="btn" id="restoreTest">Test</button>
+                    </div>
+                    <p class="hint" id="restoreConnStatus">
+                      The account needs write access to the target database.
+                    </p>
+                  </div>
+                </section>
+
+                <section class="card">
+                  <header class="card-head"><h2>Backup to restore</h2></header>
+                  <div class="card-body">
+                    <div class="row">
+                      <input
+                        type="text"
+                        id="restoreSource"
+                        class="mono"
+                        spellcheck="false"
+                        placeholder="C:\MongoDB Backups\my_database_2026-08-18_18-30-00"
+                      />
+                      <button class="btn" id="restoreBrowse">Browse…</button>
+                    </div>
+
+                    <div class="facts hidden" id="restoreFacts">
+                      <div class="fact">
+                        <div class="fact-label">Database</div>
+                        <div class="fact-value mono" id="factDatabase"></div>
+                      </div>
+                      <div class="fact">
+                        <div class="fact-label">Contents</div>
+                        <div class="fact-value mono" id="factContents"></div>
+                      </div>
+                      <div class="fact">
+                        <div class="fact-label">Taken</div>
+                        <div class="fact-value mono" id="factTaken"></div>
+                      </div>
+                    </div>
+
+                    <p class="hint" id="restoreSourceStatus">
+                      A folder from this app, or any <code>mongodump</code> output folder.
+                    </p>
+
+                    <div class="field hidden" id="restoreSourceDbField">
+                      <label class="field-label" for="restoreSourceDb">Database inside this backup</label>
+                      <select id="restoreSourceDb"></select>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="card">
+                  <header class="card-head"><h2>Target database</h2></header>
+                  <div class="card-body">
+                    <div class="row">
+                      <input
+                        type="text"
+                        id="restoreTargetDatabase"
+                        class="mono"
+                        spellcheck="false"
+                        autocomplete="off"
+                        placeholder="my_database"
+                      />
+                      <button class="btn with-chevron" id="restoreBrowseDb">
+                        Browse
+                        <svg viewBox="0 0 10 6" fill="none" aria-hidden="true">
+                          <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                      </button>
+                    </div>
+                    <p class="hint">
+                      <span class="target-state mono" id="restoreTargetState"></span>
+                      <span id="restoreTargetHint">Any name works — use a new one to clone into a staging copy.</span>
+                    </p>
+                  </div>
+                </section>
+
+                <section class="card">
+                  <header class="card-head"><h2>If the target already has data</h2></header>
+
+                  <div class="choices">
+                    <label class="choice">
+                      <input type="radio" name="restoreMode" value="keep" checked />
+                      <span class="choice-text">
+                        <strong>Keep it</strong>
+                        <span class="choice-note">
+                          Insert new documents only. Existing ones are counted and skipped.
+                        </span>
+                      </span>
+                    </label>
+
+                    <label class="choice">
+                      <input type="radio" name="restoreMode" value="merge" />
+                      <span class="choice-text">
+                        <strong>Merge</strong>
+                        <span class="choice-note">
+                          Overwrite documents that share an <code>_id</code>, insert the rest.
+                        </span>
+                      </span>
+                    </label>
+
+                    <label class="choice is-destructive">
+                      <input type="radio" name="restoreMode" value="drop" />
+                      <span class="choice-text">
+                        <strong>Replace</strong>
+                        <span class="choice-note">
+                          Drop each collection in the backup before restoring it.
+                        </span>
+                      </span>
+                    </label>
+
+                    <label class="choice is-destructive">
+                      <input type="radio" name="restoreMode" value="dropDatabase" />
+                      <span class="choice-text">
+                        <strong>Drop the whole database</strong>
+                        <span class="choice-note">
+                          Deletes everything in the target first, including collections that are
+                          not in this backup.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <label class="danger-strip hidden" id="restoreConfirmRow">
+                    <input type="checkbox" id="restoreDropConfirm" />
+                    <span class="check-text" id="restoreConfirmLabel"></span>
+                  </label>
+                </section>
+
+                <section class="card dry hidden" id="dryCard">
+                  <header class="card-head">
+                    <h2 class="accent">Dry run · nothing was written</h2>
+                    <span class="spacer"></span>
+                    <button class="link dim" id="dryDismiss">Dismiss</button>
+                  </header>
+                  <div class="dry-head">
+                    <span>Collection</span>
+                    <span class="num">In backup</span>
+                    <span class="num">In target</span>
+                    <span>Outcome</span>
+                  </div>
+                  <div id="dryRows"></div>
+                  <footer class="card-foot" id="dryTotal"></footer>
+                </section>
+              </div>
+
+              <div class="grid-side">
+                <section class="card">
+                  <header class="card-head"><h2>Advanced</h2></header>
+                  <div class="card-body stack">
+                    <label class="check">
+                      <input type="checkbox" id="restoreIndexes" checked />
+                      <span class="check-text">Recreate indexes from the backup</span>
+                    </label>
+                    <label class="check">
+                      <input type="checkbox" id="restoreBypassValidation" />
+                      <span class="check-text">Bypass document validation rules</span>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="card">
+                  <header class="card-head">
+                    <h2>Collections</h2>
+                    <span class="spacer"></span>
+                    <button class="link" id="restoreSelectAll">All</button>
+                    <button class="link dim" id="restoreSelectNone">None</button>
+                  </header>
+                  <div class="collection-list" id="restoreCollections">
+                    <p class="empty">Choose a backup folder to list its collections.</p>
+                  </div>
+                  <footer class="card-foot" id="restoreCollectionsFooter">
+                    Nothing selected yet.
+                  </footer>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <!-- ─────────────────────────── History ─────────────────────────── -->
+          <section class="view" id="view-history" role="tabpanel" aria-label="History">
+            <div class="history">
+              <div class="history-bar">
+                <span id="historySummary">No runs recorded yet.</span>
+                <span class="spacer"></span>
+                <button class="link dim" id="historyClear">Clear history</button>
+              </div>
+              <div id="historyList"></div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ─────────────────────────── Action bar ─────────────────────────── -->
+        <div class="actionbar" id="actionBar">
+          <span class="actionbar-progress" id="actionProgress"></span>
+          <div class="actionbar-text">
+            <div class="actionbar-title" id="actionTitle">Ready to back up</div>
+            <div class="actionbar-detail mono" id="actionDetail"></div>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn" id="actionSecondary">Open backup folder</button>
+          <button class="btn primary" id="actionPrimary">Start backup</button>
+        </div>
+
+        <!-- ─────────────────────────────── Log ─────────────────────────────── -->
+        <div class="logdock" id="logDock">
+          <div class="logdock-head">
+            <button class="logdock-toggle" id="logToggle" aria-expanded="false" aria-controls="log">
+              <svg class="chevron" viewBox="0 0 10 6" fill="none" aria-hidden="true">
+                <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              <span class="logdock-label">Log</span>
+              <span class="logdock-tail mono" id="logTail"></span>
+            </button>
+            <button class="link dim" id="logCopy">Copy</button>
+            <button class="link dim" id="logSave">Save</button>
+            <button class="link dim" id="logClear">Clear</button>
+          </div>
+          <div class="logdock-body" id="log" aria-live="polite"></div>
+        </div>
+      </main>
+    </div>
 
     <!-- Native <dialog>: focus trapping, Esc-to-close and the backdrop come
          for free, so none of that has to be hand-rolled. -->
+    <!-- Adding and editing a saved connection. One dialog serves both: the only
+         difference is whether it opens filled in and offers Delete. -->
+    <dialog class="sheet" id="connectionDialog" aria-labelledby="connectionDialogTitle">
+      <div class="sheet-head">
+        <h2 id="connectionDialogTitle">New connection</h2>
+        <p class="sheet-sub" id="connectionDialogSub">
+          Saved on this machine, encrypted for your Windows account.
+        </p>
+      </div>
+
+      <div class="sheet-body">
+        <label class="field-label" for="connectionName">Name</label>
+        <input
+          type="text"
+          id="connectionName"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Production (Atlas)"
+        />
+
+        <label class="field-label" for="connectionUri">MongoDB URI</label>
+        <div class="row">
+          <input
+            type="password"
+            id="connectionUri"
+            class="mono"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="mongodb+srv://user:password@cluster0.example.mongodb.net/"
+          />
+          <button class="btn" id="connectionUriReveal" title="Show or hide the URI">Show</button>
+        </div>
+        <p class="hint">Supports <code>mongodb://</code> and <code>mongodb+srv://</code> (Atlas).</p>
+
+        <label class="field-label" for="connectionDatabase">
+          Default database <span class="optional">optional</span>
+        </label>
+        <input
+          type="text"
+          id="connectionDatabase"
+          class="mono"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="my_database"
+        />
+        <p class="hint">Filled in for you when this connection is chosen.</p>
+
+        <label class="check sheet-check">
+          <input type="checkbox" id="connectionProduction" />
+          <span class="check-text">
+            Treat as production<em>
+              — flags it in the sidebar, and every restore into this server has to be confirmed in
+              the form, not just the safe ones.</em
+            >
+          </span>
+        </label>
+
+        <p class="sheet-status" id="connectionStatus"></p>
+      </div>
+
+      <div class="sheet-actions">
+        <button class="btn danger-outline hidden" id="connectionDelete">Delete</button>
+        <span class="spacer"></span>
+        <button class="btn" id="connectionTest">Test</button>
+        <button class="btn" id="connectionCancel">Cancel</button>
+        <button class="btn primary" id="connectionSave">Save</button>
+      </div>
+    </dialog>
+
     <dialog class="about" id="aboutDialog" aria-labelledby="aboutTitle">
       <div class="about-head">
-        <svg class="about-mark" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 2c2.6 3.2 4.4 6.4 4.4 9.7 0 3.6-2 6.6-4.4 8.3V2Z" fill="currentColor" />
+        <svg class="about-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <ellipse cx="8" cy="3.6" rx="5.4" ry="2.1" stroke="currentColor" stroke-width="1.3" />
           <path
-            d="M12 2C9.4 5.2 7.6 8.4 7.6 11.7c0 3.6 2 6.6 4.4 8.3V2Z"
-            fill="currentColor"
-            opacity=".5"
+            d="M2.6 3.6v8.8c0 1.16 2.42 2.1 5.4 2.1s5.4-.94 5.4-2.1V3.6"
+            stroke="currentColor"
+            stroke-width="1.3"
           />
-          <rect x="11.4" y="19" width="1.2" height="3" rx=".6" fill="currentColor" opacity=".7" />
+          <path d="M2.6 8c0 1.16 2.42 2.1 5.4 2.1s5.4-.94 5.4-2.1" stroke="currentColor" stroke-width="1.3" />
         </svg>
         <div>
           <h2 id="aboutTitle">MongoDB Backup and Restore</h2>
@@ -67,7 +590,7 @@
         <dd>MIT</dd>
 
         <dt>Runtime</dt>
-        <dd id="aboutRuntime" class="about-mono"></dd>
+        <dd id="aboutRuntime" class="mono"></dd>
       </dl>
 
       <div class="about-actions">
@@ -75,340 +598,6 @@
         <button class="btn primary" id="aboutClose">Close</button>
       </div>
     </dialog>
-
-    <main class="content">
-      <!-- ───────────────────────────── Backup ───────────────────────────── -->
-      <section class="panel is-active" id="panel-backup" role="tabpanel">
-        <!-- States the direction of travel, because the two tabs are otherwise
-             the same shape and mistaking one for the other writes to a live
-             database. -->
-        <div class="mode-banner">
-          <span class="mode-flow">
-            <span class="mode-node">MongoDB</span>
-            <span class="mode-arrow" aria-hidden="true">→</span>
-            <span class="mode-node">folder on disk</span>
-          </span>
-          <span class="mode-note">Copies data out. Nothing in your databases changes.</span>
-        </div>
-
-        <div class="columns">
-          <!-- What you must fill in to run a backup. -->
-          <div class="col col-main">
-            <div class="section">
-              <div class="section-head">
-                <h2>Back up from</h2>
-                <div class="profile-bar">
-                  <select id="backupProfile" title="Saved connections">
-                    <option value="">Saved connections…</option>
-                  </select>
-                  <button class="btn ghost small" id="backupSaveProfile">Save</button>
-                  <button class="btn ghost small danger" id="backupDeleteProfile">Delete</button>
-                </div>
-              </div>
-
-              <div class="grid">
-                <div class="field">
-                  <label for="backupUri">MongoDB URI</label>
-                  <div class="input-row">
-                    <input
-                      type="password"
-                      id="backupUri"
-                      class="mono-input"
-                      spellcheck="false"
-                      autocomplete="off"
-                      placeholder="mongodb+srv://user:password@cluster0.example.mongodb.net/"
-                    />
-                    <button class="btn reveal" id="backupUriReveal" title="Show or hide the URI">
-                      Show
-                    </button>
-                    <button class="btn" id="backupTest">Test connection</button>
-                  </div>
-                  <p class="hint" id="backupConnStatus">
-                    Supports <code>mongodb://</code> and <code>mongodb+srv://</code> (Atlas).
-                  </p>
-                </div>
-
-                <div class="field">
-                  <label for="backupDatabase">Database</label>
-                  <div class="input-row">
-                    <input
-                      type="text"
-                      id="backupDatabase"
-                      class="mono-input"
-                      spellcheck="false"
-                      autocomplete="off"
-                      placeholder="my_database"
-                    />
-                    <button class="btn" id="backupLoadDatabases">Load</button>
-                  </div>
-                  <p class="hint">Type to filter once the list is loaded.</p>
-                </div>
-
-                <div class="field">
-                  <label for="backupOutput">Save to folder</label>
-                  <div class="input-row">
-                    <input
-                      type="text"
-                      id="backupOutput"
-                      class="mono-input"
-                      spellcheck="false"
-                      placeholder="C:\MongoDB Backups"
-                    />
-                    <button class="btn" id="backupBrowse">Browse…</button>
-                  </div>
-                  <p class="hint">Each run gets its own timestamped subfolder.</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Everything optional, always visible in its own column. -->
-          <aside class="col col-advanced">
-            <div class="section">
-              <div class="section-head"><h2>Advanced</h2></div>
-
-              <div class="advanced-body">
-                <label class="check">
-                  <input type="checkbox" id="backupGzip" />
-                  <span>Compress with gzip <em>— smaller files, slightly slower</em></span>
-                </label>
-
-                <div class="field">
-                  <div class="label">Collections</div>
-                  <div class="input-row wrap">
-                    <button class="btn small" id="backupLoadCollections">Load collection list</button>
-                    <button class="btn ghost small" id="backupSelectAll">Select all</button>
-                    <button class="btn ghost small" id="backupSelectNone">Clear</button>
-                  </div>
-                  <div class="checklist" id="backupCollections">
-                    <p class="empty">
-                      All collections are backed up unless you pick specific ones.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </aside>
-        </div>
-
-        <div class="section-actions">
-          <button class="btn primary" id="backupStart">Start backup</button>
-          <button class="btn" id="backupOpenFolder" disabled>Open backup folder</button>
-        </div>
-      </section>
-
-      <!-- ───────────────────────────── Restore ──────────────────────────── -->
-      <section class="panel" id="panel-restore" role="tabpanel">
-        <div class="mode-banner">
-          <span class="mode-flow">
-            <span class="mode-node">folder on disk</span>
-            <span class="mode-arrow" aria-hidden="true">→</span>
-            <span class="mode-node">MongoDB</span>
-          </span>
-          <span class="mode-note">Writes data in. The target database is modified.</span>
-        </div>
-
-        <div class="columns">
-          <div class="col col-main">
-            <div class="section">
-              <div class="section-head">
-                <h2>Restore into</h2>
-                <div class="profile-bar">
-                  <select id="restoreProfile" title="Saved connections">
-                    <option value="">Saved connections…</option>
-                  </select>
-                  <button class="btn ghost small" id="restoreSaveProfile">Save</button>
-                  <button class="btn ghost small danger" id="restoreDeleteProfile">Delete</button>
-                </div>
-              </div>
-
-              <div class="grid">
-                <div class="field">
-                  <label for="restoreUri">MongoDB URI</label>
-                  <div class="input-row">
-                    <input
-                      type="password"
-                      id="restoreUri"
-                      class="mono-input"
-                      spellcheck="false"
-                      autocomplete="off"
-                      placeholder="mongodb+srv://user:password@cluster0.example.mongodb.net/"
-                    />
-                    <button class="btn reveal" id="restoreUriReveal" title="Show or hide the URI">
-                      Show
-                    </button>
-                    <button class="btn" id="restoreTest">Test connection</button>
-                  </div>
-                  <p class="hint" id="restoreConnStatus">
-                    The account needs write access to the target database.
-                  </p>
-                </div>
-
-                <div class="field">
-                  <label for="restoreSource">Backup folder</label>
-                  <div class="input-row">
-                    <input
-                      type="text"
-                      id="restoreSource"
-                      class="mono-input"
-                      spellcheck="false"
-                      placeholder="C:\MongoDB Backups\my_database_2026-08-18_18-30-00"
-                    />
-                    <button class="btn" id="restoreBrowse">Browse…</button>
-                  </div>
-                  <p class="hint" id="restoreSourceStatus">
-                    A folder from this app, or any <code>mongodump</code> output folder.
-                  </p>
-                </div>
-
-                <div class="field hidden" id="restoreSourceDbField">
-                  <label for="restoreSourceDb">Database inside this backup</label>
-                  <select id="restoreSourceDb"></select>
-                </div>
-
-                <div class="field">
-                  <label for="restoreTargetDatabase">Target database</label>
-                  <div class="input-row">
-                    <input
-                      type="text"
-                      id="restoreTargetDatabase"
-                      class="mono-input"
-                      spellcheck="false"
-                      autocomplete="off"
-                      placeholder="my_database"
-                    />
-                    <button class="btn" id="restoreLoadDatabases">Load</button>
-                  </div>
-                  <p class="hint">Any name works — use a new one to clone into a staging copy.</p>
-                </div>
-              </div>
-            </div>
-
-            <div class="section">
-              <div class="section-head">
-                <h2>If the target already has data</h2>
-              </div>
-
-              <div class="choices">
-                <label class="choice">
-                  <input type="radio" name="restoreMode" value="keep" checked />
-                  <span class="choice-text">
-                    <strong>Keep it</strong>
-                    <span class="choice-note">
-                      Insert new documents only. Existing ones are counted and skipped.
-                    </span>
-                  </span>
-                </label>
-
-                <label class="choice">
-                  <input type="radio" name="restoreMode" value="merge" />
-                  <span class="choice-text">
-                    <strong>Merge</strong>
-                    <span class="choice-note">
-                      Overwrite documents that share an <code>_id</code>, insert the rest.
-                    </span>
-                  </span>
-                </label>
-
-                <label class="choice is-destructive">
-                  <input type="radio" name="restoreMode" value="drop" />
-                  <span class="choice-text">
-                    <strong>Replace</strong>
-                    <span class="choice-note">
-                      Drop each collection in the backup before restoring it.
-                    </span>
-                  </span>
-                </label>
-
-                <label class="choice is-destructive">
-                  <input type="radio" name="restoreMode" value="dropDatabase" />
-                  <span class="choice-text">
-                    <strong>Drop the whole database</strong>
-                    <span class="choice-note">
-                      Deletes everything in the target first, including collections not in this
-                      backup.
-                    </span>
-                  </span>
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <aside class="col col-advanced">
-            <div class="section">
-              <div class="section-head"><h2>Advanced</h2></div>
-
-              <div class="advanced-body">
-                <label class="check">
-                  <input type="checkbox" id="restoreIndexes" checked />
-                  <span>Recreate indexes from the backup</span>
-                </label>
-                <label class="check">
-                  <input type="checkbox" id="restoreBypassValidation" />
-                  <span>Bypass document validation rules</span>
-                </label>
-
-                <div class="field">
-                  <div class="label">Collections</div>
-                  <div class="input-row wrap">
-                    <button class="btn ghost small" id="restoreSelectAll">Select all</button>
-                    <button class="btn ghost small" id="restoreSelectNone">Clear</button>
-                  </div>
-                  <div class="checklist" id="restoreCollections">
-                    <p class="empty">Choose a backup folder to list its collections.</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </aside>
-        </div>
-
-        <div class="section-actions">
-          <button class="btn primary" id="restoreStart">Start restore</button>
-        </div>
-      </section>
-    </main>
-
-    <!-- ─────────────────────── Progress and activity ─────────────────────── -->
-    <section class="status">
-      <div class="status-head">
-        <button class="status-toggle" id="statusToggle" aria-expanded="false">
-          <strong class="status-title" id="statusTitle">Idle</strong>
-          <span class="status-detail" id="statusDetail"></span>
-        </button>
-        <div class="status-controls">
-          <button class="btn ghost small" id="logCopy">Copy log</button>
-          <button class="btn ghost small" id="logSave">Save log</button>
-          <button class="btn ghost small" id="logClear">Clear</button>
-          <button class="btn small danger hidden" id="jobCancel">Cancel</button>
-        </div>
-      </div>
-
-      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-
-      <div class="status-body">
-        <div class="table-wrap">
-          <table class="table" id="progressTable">
-            <thead>
-              <tr>
-                <th>Collection</th>
-                <th class="num">Documents</th>
-                <th class="num">Size</th>
-                <th class="num">Indexes</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="progressRows">
-              <tr class="placeholder">
-                <td colspan="5">No job has run yet.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="log" id="log" aria-live="polite"></div>
-      </div>
-    </section>
 
     <script src="renderer.js"></script>
   </body>

@@ -7,8 +7,9 @@ const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } = requir
 
 const mongo = require('./mongo');
 const settings = require('./settings');
+const history = require('./history');
 const { runBackup } = require('./backup');
-const { inspectBackup, runRestore } = require('./restore');
+const { inspectBackup, previewRestore, runRestore } = require('./restore');
 const { describeError } = require('./util');
 
 // Safe to read at runtime, unlike build.appId: electron-builder keeps the
@@ -28,17 +29,29 @@ const jobs = new Map();
 
 let mainWindow = null;
 
+/** The stylesheet's --bg, so the window never flashes the wrong colour. */
+const SHELL_BACKGROUND = { dark: '#12100F', light: '#F7F5F3' };
+
+/** Whichever theme the renderer is about to apply: the saved one, else the OS. */
+function startingTheme() {
+  const saved = settings.getSettings().prefs.theme;
+  if (saved === 'dark' || saved === 'light') return saved;
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1180,
+    width: 1280,
     height: 880,
-    minWidth: 900,
-    minHeight: 660,
-    // Match the stylesheet's --bg for the active OS theme, so there is no
-    // flash of the wrong colour before the page paints.
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0a0d11' : '#f5f6f8',
+    // The layout is a fixed-width sidebar plus a two-column form; below this it
+    // stops being usable rather than merely tight.
+    minWidth: 1120,
+    minHeight: 700,
+    backgroundColor: SHELL_BACKGROUND[startingTheme()],
     show: false,
-    autoHideMenuBar: true,
+    // The title bar is drawn by the renderer, so the app can carry its own
+    // colours right to the top edge instead of a grey OS strip above them.
+    frame: false,
     title: 'MongoDB Backup and Restore',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -51,6 +64,15 @@ function createWindow() {
   Menu.setApplicationMenu(null);
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
+
+  // The maximise button is a toggle, so the renderer has to be told when the
+  // state changes by any other route — a double-click, Win+Up, or a snap.
+  const sendWindowState = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('window:state', { maximized: mainWindow.isMaximized() });
+  };
+  mainWindow.on('maximize', sendWindowState);
+  mainWindow.on('unmaximize', sendWindowState);
 
   // External links open in the default browser, never inside the app.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -75,34 +97,108 @@ async function runJob(kind, request, engine) {
   const job = { id: jobId, kind, cancelled: false };
   jobs.set(jobId, job);
 
+  const startedAt = new Date();
+  // What each collection reached, so a run that fails halfway still records
+  // which collections made it rather than recording nothing at all.
+  const reached = new Map();
+
   const ctx = {
     isCancelled: () => job.cancelled,
     log: (level, message) =>
       emit(jobId, { kind: 'log', level, message, ts: new Date().toISOString() }),
-    plan: (collections) => emit(jobId, { kind: 'plan', collections }),
-    collection: (payload) => emit(jobId, { kind: 'collection', ...payload }),
+    plan: (collections) => {
+      for (const collection of collections) {
+        reached.set(collection.name, {
+          name: collection.name,
+          type: collection.type || 'collection',
+          documents: 0,
+          bytes: 0,
+          indexes: 0,
+          status: 'pending',
+        });
+      }
+      emit(jobId, { kind: 'plan', collections });
+    },
+    collection: (payload) => {
+      const previous = reached.get(payload.name) || { name: payload.name };
+      reached.set(payload.name, {
+        ...previous,
+        type: payload.type || previous.type || 'collection',
+        documents: Number(payload.documents) || previous.documents || 0,
+        bytes: Number(payload.bytes) || previous.bytes || 0,
+        indexes: Number(payload.indexes) || previous.indexes || 0,
+        status: payload.status || previous.status || 'pending',
+      });
+      emit(jobId, { kind: 'collection', ...payload });
+    },
     progress: (payload) => emit(jobId, { kind: 'progress', ...payload }),
   };
 
   emit(jobId, { kind: 'started', job: kind });
 
+  /** Write the run into the history panel. Never fails the job itself. */
+  const record = async (status, summary, error) => {
+    try {
+      await history.addRun({
+        kind,
+        status,
+        uri: request && request.uri,
+        startedAt: startedAt.toISOString(),
+        durationMs: Date.now() - startedAt.getTime(),
+        error: error || '',
+        ...(kind === 'backup'
+          ? {
+              database: (summary && summary.sourceDatabase) || (request && request.database) || '',
+              folder: (summary && summary.outputFolder) || (request && request.outputDir) || '',
+              detail: request && request.gzip ? 'gzip' : '',
+            }
+          : {
+              database:
+                (summary && summary.targetDatabase) || (request && request.targetDatabase) || '',
+              folder: (summary && summary.sourceFolder) || (request && request.sourceDir) || '',
+              detail: restoreModeLabel(request),
+            }),
+        totals: (summary && summary.totals) || {
+          collections: [...reached.values()].filter((entry) => entry.status === 'done').length,
+          documents: [...reached.values()].reduce((sum, entry) => sum + entry.documents, 0),
+          bytes: [...reached.values()].reduce((sum, entry) => sum + entry.bytes, 0),
+        },
+        collections: (summary && summary.collections) || [...reached.values()],
+      });
+    } catch {
+      /* a history write must never turn a finished job into a failed one */
+    }
+  };
+
   try {
     const summary = await engine(request, ctx);
+    await record('done', summary);
     emit(jobId, { kind: 'done', summary });
     return { ok: true, jobId, summary };
   } catch (error) {
     if (error && error.cancelled) {
       ctx.log('warn', 'Cancelled. Data written before cancelling was left in place.');
+      await record('cancelled', null, 'Cancelled by user.');
       emit(jobId, { kind: 'cancelled' });
       return { ok: false, jobId, cancelled: true, error: 'Cancelled by user.' };
     }
     const message = describeError(error);
     ctx.log('error', message);
+    await record('failed', null, message);
     emit(jobId, { kind: 'failed', error: message });
     return { ok: false, jobId, error: message };
   } finally {
     jobs.delete(jobId);
   }
+}
+
+/** How a restore treated existing data, for the one-line history summary. */
+function restoreModeLabel(request) {
+  if (!request) return '';
+  if (request.dropDatabase) return 'dropped the database first';
+  if (request.drop) return 'replaced each collection';
+  if (request.writeMode === 'upsert') return 'merged on _id';
+  return 'kept existing documents';
 }
 
 /** Wrap an IPC handler so errors come back as { ok: false, error }. */
@@ -125,6 +221,8 @@ function registerHandlers() {
     platform: `${process.platform} ${process.arch}`,
     userData: app.getPath('userData'),
     defaultBackupDir: path.join(app.getPath('documents'), 'MongoDB Backups'),
+    maximized: Boolean(mainWindow && mainWindow.isMaximized()),
+    systemTheme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
   }));
 
   handle('dialog:selectFolder', async (options = {}) => {
@@ -168,11 +266,33 @@ function registerHandlers() {
     return true;
   });
 
+  handle('window:minimize', async () => {
+    if (mainWindow) mainWindow.minimize();
+    return true;
+  });
+
+  handle('window:toggleMaximize', async () => {
+    if (!mainWindow) return false;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+    return mainWindow.isMaximized();
+  });
+
+  handle('window:close', async () => {
+    if (mainWindow) mainWindow.close();
+    return true;
+  });
+
+  handle('history:list', async () => history.listRuns());
+  handle('history:remove', (id) => history.removeRun(id));
+  handle('history:clear', async () => history.clearRuns());
+
   handle('mongo:test', (uri) => mongo.testConnection(uri));
   handle('mongo:listDatabases', (uri) => mongo.listDatabases(uri));
   handle('mongo:survey', (uri) => mongo.surveyConnection(uri));
   handle('mongo:listCollections', ({ uri, database }) => mongo.listCollections(uri, database));
   handle('restore:inspect', (folder) => inspectBackup(folder));
+  handle('restore:preview', (request) => previewRestore(request));
 
   handle('settings:get', async () => settings.getSettings());
   handle('settings:savePrefs', (prefs) => settings.savePrefs(prefs));
