@@ -27,7 +27,7 @@ const {
 } = require('bson');
 
 const { runBackup } = require('../src/main/backup');
-const { runRestore } = require('../src/main/restore');
+const { inspectBackup, runRestore } = require('../src/main/restore');
 const { withClient } = require('../src/main/mongo');
 
 const URI = process.argv[2] || 'mongodb://127.0.0.1:27017';
@@ -155,6 +155,15 @@ async function indexNames(db, name) {
 async function totalDocuments(db) {
   let total = 0;
   for (const name of state.dataCollections) {
+    total += await db.collection(name).countDocuments();
+  }
+  return total;
+}
+
+/** Every document in a database, whatever its collections are called. */
+async function countEverything(db) {
+  let total = 0;
+  for (const name of await collectionNames(db)) {
     total += await db.collection(name).countDocuments();
   }
   return total;
@@ -323,6 +332,185 @@ async function testTargets(client, folder) {
   await client.db(renamed).dropDatabase();
 }
 
+/**
+ * Backing up several databases in one run.
+ *
+ * The set goes into a single timestamped folder with a subfolder per database,
+ * which is mongodump's own root layout — so the whole set has to come back
+ * through our own restore, and each database has to be usable on its own too.
+ */
+async function testMultiDatabase(client, workDir) {
+  console.log('\n── multiple databases in one run ──');
+
+  const names = ['mbr_multi_a', 'mbr_multi_b', 'mbr_multi_c'];
+  const expected = {};
+
+  for (const [index, name] of names.entries()) {
+    await client.db(name).dropDatabase();
+    const count = 20 + index * 10;
+    await client
+      .db(name)
+      .collection('items')
+      .insertMany(Array.from({ length: count }, (_, n) => ({ _id: n, from: name })));
+    await client.db(name).collection('notes').insertMany([{ _id: 1, of: name }]);
+    expected[name] = count + 1;
+  }
+
+  // Progress is reported per database when there is more than one, because the
+  // UI lists databases rather than collections in that mode.
+  const units = [];
+  const progressUnits = new Set();
+  const context = {
+    ...makeContext('multi'),
+    plan: (entries) => units.push(...entries.map((entry) => entry.name)),
+    progress: (payload) => progressUnits.add(payload.collection),
+  };
+
+  const summary = await runBackup(
+    { uri: URI, databases: names, outputDir: workDir },
+    context
+  );
+
+  check(
+    'a multi-database run reports one unit of work per database',
+    JSON.stringify(units) === JSON.stringify(names),
+    units.join(', ')
+  );
+  check(
+    'progress is reported against the databases, not their collections',
+    [...progressUnits].every((name) => names.includes(name)),
+    [...progressUnits].join(', ')
+  );
+  check(
+    'the run folder is one timestamped folder, not one per database',
+    path.basename(summary.outputFolder).startsWith('backup_'),
+    path.basename(summary.outputFolder)
+  );
+  check(
+    'the summary totals every database',
+    summary.totals.databases === 3 &&
+      summary.totals.collections === 6 &&
+      summary.totals.documents === expected[names[0]] + expected[names[1]] + expected[names[2]],
+    JSON.stringify(summary.totals)
+  );
+
+  const entries = await fsp.readdir(summary.outputFolder, { withFileTypes: true });
+  const subfolders = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  check(
+    'each database gets its own subfolder',
+    JSON.stringify(subfolders) === JSON.stringify(names),
+    subfolders.join(', ')
+  );
+
+  const perDatabaseFiles = await fsp.readdir(path.join(summary.outputFolder, names[0]));
+  check(
+    'a subfolder holds that database dump and its own manifest',
+    perDatabaseFiles.includes('items.bson') &&
+      perDatabaseFiles.includes('items.metadata.json') &&
+      perDatabaseFiles.includes('backup-manifest.json'),
+    perDatabaseFiles.join(' ')
+  );
+
+  // Read back as a set.
+  const inspection = await inspectBackup(summary.outputFolder);
+  check(
+    'the run reads back as one dump root holding every database',
+    inspection.databases.length === 3 &&
+      JSON.stringify(inspection.databases.map((entry) => entry.name).sort()) ===
+        JSON.stringify(names),
+    inspection.databases.map((entry) => entry.name).join(', ')
+  );
+
+  // And each database restores from it, into a renamed target.
+  for (const name of names) {
+    const target = `${name}_restored`;
+    await client.db(target).dropDatabase();
+    await runRestore(
+      {
+        uri: URI,
+        sourceDir: summary.outputFolder,
+        sourceDatabase: name,
+        targetDatabase: target,
+      },
+      makeContext('multi-restore')
+    );
+    // Counted over whatever the target actually holds: the shared
+    // totalDocuments() helper walks the main fixture's collection list, which
+    // does not include these databases' collections.
+    const restored = await countEverything(client.db(target));
+    check(
+      `"${name}" restores out of the set with all ${expected[name]} documents`,
+      restored === expected[name],
+      `got ${restored}`
+    );
+    await client.db(target).dropDatabase();
+  }
+
+  // A subfolder on its own is still a complete, restorable backup.
+  const alone = await inspectBackup(path.join(summary.outputFolder, names[1]));
+  check(
+    'one database subfolder still stands alone as a backup',
+    alone.databases.length === 1 && alone.databases[0].name === names[1],
+    JSON.stringify(alone.databases.map((entry) => entry.name))
+  );
+
+  // Selecting collections applies to a single database only; asking for both
+  // must not quietly drop collections from the other databases.
+  const filtered = await runBackup(
+    { uri: URI, databases: names, outputDir: workDir, includeCollections: ['items'] },
+    makeContext('multi')
+  );
+  check(
+    'a flat collection filter is ignored for a multi-database run rather than half-applied',
+    filtered.totals.collections === 6,
+    `got ${filtered.totals.collections} collection(s)`
+  );
+
+  // Per-database selection: one collection from the first, everything from the
+  // second, and the third left out of the run entirely.
+  const picked = await runBackup(
+    {
+      uri: URI,
+      databases: [names[0], names[1]],
+      outputDir: workDir,
+      selections: { [names[0]]: ['items'], [names[1]]: null },
+    },
+    makeContext('multi')
+  );
+  const pickedFolders = await fsp.readdir(picked.outputFolder, { withFileTypes: true });
+  const first = await fsp.readdir(path.join(picked.outputFolder, names[0]));
+
+  check(
+    'each database can contribute a different set of collections',
+    picked.totals.databases === 2 && picked.totals.collections === 3,
+    JSON.stringify(picked.totals)
+  );
+  check(
+    'the narrowed database holds only the collection that was asked for',
+    first.includes('items.bson') && !first.includes('notes.bson'),
+    first.join(' ')
+  );
+  check(
+    'a database left out of the selection is left out of the run',
+    pickedFolders
+      .filter((entry) => entry.isDirectory())
+      .every((entry) => entry.name !== names[2]),
+    pickedFolders.map((entry) => entry.name).join(' ')
+  );
+
+  // Two runs in the same second must not share a folder, or the second run's
+  // manifest would sit beside the first run's files.
+  const back = await runBackup({ uri: URI, databases: names, outputDir: workDir }, makeContext('multi'));
+  const toBack = await runBackup({ uri: URI, databases: names, outputDir: workDir }, makeContext('multi'));
+  check(
+    'a second run started in the same second gets its own folder',
+    back.outputFolder !== toBack.outputFolder,
+    `${path.basename(back.outputFolder)} vs ${path.basename(toBack.outputFolder)}`
+  );
+
+  for (const name of names) await client.db(name).dropDatabase();
+}
+
 async function testErrors() {
   console.log('\n── error handling ──');
 
@@ -367,6 +555,7 @@ async function main() {
       await runScenario(client, workDir, { gzip: true });
       await testRerunModes(client, plainFolder);
       await testTargets(client, plainFolder);
+      await testMultiDatabase(client, workDir);
       await testErrors();
 
       await client.db(SOURCE_DB).dropDatabase();

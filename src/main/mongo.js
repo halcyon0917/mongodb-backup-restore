@@ -3,6 +3,8 @@
 const dnsPromises = require('dns').promises;
 const { MongoClient } = require('mongodb');
 
+const pool = require('./pool');
+
 const URI_SCHEME = /^mongodb(\+srv)?:\/\//i;
 
 // mongodb+srv://[credentials@]hostname[/database][?options]
@@ -195,18 +197,19 @@ function databaseFromUri(uri) {
   }
 }
 
-async function runWithUri(uri, fn) {
+async function openClient(uri) {
   const client = new MongoClient(uri, DEFAULT_CLIENT_OPTIONS);
   try {
     await client.connect();
-    return await fn(client);
-  } finally {
+    return client;
+  } catch (error) {
     await client.close().catch(() => {});
+    throw error;
   }
 }
 
 /**
- * Open a client, hand it to `fn`, and always close it again.
+ * Build a connected client for `uri`, falling back to public DNS if needed.
  *
  * If an Atlas-style "mongodb+srv://" connection fails in the DNS lookup rather
  * than in MongoDB itself, retry once by resolving the cluster through public DNS
@@ -214,16 +217,14 @@ async function runWithUri(uri, fn) {
  * queries intermittently, and the raw driver error ("querySrv ECONNREFUSED")
  * gives no hint that DNS is the problem.
  */
-async function withClient(uri, fn, { onNotice = () => {} } = {}) {
-  const validated = validateUri(uri);
-
+async function connectWithFallback(uri, onNotice) {
   try {
-    return await runWithUri(validated, fn);
+    return await openClient(uri);
   } catch (error) {
-    const isSrv = /^mongodb\+srv:/i.test(validated);
+    const isSrv = /^mongodb\+srv:/i.test(uri);
     if (!isSrv || !isSrvLookupError(error)) throw error;
 
-    const hostname = (SRV_URI_RE.exec(validated) || [])[2] || 'the cluster';
+    const hostname = (SRV_URI_RE.exec(uri) || [])[2] || 'the cluster';
     onNotice(
       `DNS lookup for ${hostname} failed (${describeDnsError(error)}). ` +
         'Retrying through public DNS…'
@@ -231,7 +232,7 @@ async function withClient(uri, fn, { onNotice = () => {} } = {}) {
 
     let fallback;
     try {
-      fallback = await buildSeedListUri(validated);
+      fallback = await buildSeedListUri(uri);
     } catch (dnsError) {
       throw new Error(srvHelpMessage(hostname, error, dnsError));
     }
@@ -240,8 +241,36 @@ async function withClient(uri, fn, { onNotice = () => {} } = {}) {
       `Resolved ${fallback.hostCount} cluster host(s) via ${fallback.resolver}; ` +
         'connecting to them directly.'
     );
-    return runWithUri(fallback.uri, fn);
+    return openClient(fallback.uri);
   }
+}
+
+/**
+ * Hand `fn` a live client for this URI.
+ *
+ * The client comes from the session pool and is NOT closed afterwards, so the
+ * next call to the same server reuses the open connection and the sidebar's
+ * indicator can report whether that server is actually reachable. See pool.js.
+ */
+async function withClient(uri, fn, { onNotice = () => {} } = {}) {
+  const validated = validateUri(uri);
+  const client = await pool.acquire(validated, async () => {
+    const connected = await connectWithFallback(validated, onNotice);
+    // Describe the server on the way in, so a reused connection can report its
+    // version without another round trip.
+    const details = await describeServer(connected, validated).catch(() => null);
+    return {
+      client: connected,
+      serverVersion: details && details.serverVersion,
+      topology: details && details.topology,
+    };
+  });
+  return fn(client);
+}
+
+/** Drop a pooled connection, e.g. because its saved connection was deleted. */
+async function disconnect(uri) {
+  return pool.close(String(uri || '').trim());
 }
 
 /** What server is on the other end of an open client. */
@@ -376,9 +405,11 @@ module.exports = {
   buildSeedListUri,
   composeSeedListUri,
   databaseFromUri,
+  disconnect,
   isSrvLookupError,
   listCollections,
   listDatabases,
+  pool,
   surveyConnection,
   testConnection,
   validateDatabaseName,

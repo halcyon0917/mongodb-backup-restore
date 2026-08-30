@@ -81,6 +81,12 @@ function createWindow() {
   });
 }
 
+/** Push one connection's reachability to the renderer as the driver sees it. */
+function emitConnectionState(uri, state) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('connection:state', { uri, ...state });
+}
+
 /** Send a job event to the renderer, if the window is still around. */
 function emit(jobId, payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -148,7 +154,10 @@ async function runJob(kind, request, engine) {
         error: error || '',
         ...(kind === 'backup'
           ? {
-              database: (summary && summary.sourceDatabase) || (request && request.database) || '',
+              // A run over several databases has no single source name, so the
+              // list is what gets recorded and `database` stays empty.
+              database: (summary && summary.sourceDatabase) || singleDatabase(request) || '',
+              databases: backupDatabases(summary, request, reached),
               folder: (summary && summary.outputFolder) || (request && request.outputDir) || '',
               detail: request && request.gzip ? 'gzip' : '',
             }
@@ -190,6 +199,43 @@ async function runJob(kind, request, engine) {
   } finally {
     jobs.delete(jobId);
   }
+}
+
+/** The one database a backup asked for, or null when it asked for several. */
+function singleDatabase(request) {
+  if (!request) return null;
+  const names = Array.isArray(request.databases) && request.databases.length
+    ? request.databases
+    : [request.database].filter(Boolean);
+  return names.length === 1 ? names[0] : null;
+}
+
+/**
+ * The per-database breakdown of a backup, or [] for a single-database run.
+ *
+ * A run that failed part way has no summary, so what the job actually reached
+ * is used instead — a half-finished run is exactly the one worth being able to
+ * look at afterwards.
+ */
+function backupDatabases(summary, request, reached) {
+  if (summary && Array.isArray(summary.databases)) return summary.databases;
+
+  const names = request && Array.isArray(request.databases) ? request.databases : [];
+  if (names.length < 2) return [];
+
+  return names.map((name) => {
+    const unit = reached.get(name);
+    return {
+      name,
+      status: unit ? unit.status : 'pending',
+      totals: {
+        collections: 0,
+        documents: unit ? unit.documents : 0,
+        bytes: unit ? unit.bytes : 0,
+      },
+      collections: [],
+    };
+  });
 }
 
 /** How a restore treated existing data, for the one-line history summary. */
@@ -283,6 +329,9 @@ function registerHandlers() {
     return true;
   });
 
+  handle('connection:status', async () => mongo.pool.allStatuses());
+  handle('connection:disconnect', (uri) => mongo.disconnect(uri));
+
   handle('history:list', async () => history.listRuns());
   handle('history:remove', (id) => history.removeRun(id));
   handle('history:clear', async () => history.clearRuns());
@@ -323,12 +372,19 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     app.setAppUserModelId(APP_ID);
+    mongo.pool.setStateListener(emitConnectionState);
     registerHandlers();
     createWindow();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+  });
+
+  // Connections are pooled for the session, so they have to be handed back
+  // rather than left for the process to drop.
+  app.on('before-quit', () => {
+    mongo.pool.closeAll().catch(() => {});
   });
 
   app.on('window-all-closed', () => app.quit());

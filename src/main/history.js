@@ -53,6 +53,19 @@ function listRuns() {
   return load();
 }
 
+function normaliseCollections(list) {
+  return Array.isArray(list)
+    ? list.map((collection) => ({
+        name: collection.name,
+        type: collection.type || 'collection',
+        documents: Number(collection.documents) || 0,
+        bytes: Number(collection.bytes) || 0,
+        indexes: Number(collection.indexes) || 0,
+        status: collection.status || 'done',
+      }))
+    : [];
+}
+
 /**
  * Record a finished run.
  *
@@ -75,14 +88,16 @@ async function addRun(entry) {
     durationMs: Number(entry.durationMs) || 0,
     error: entry.error || '',
     totals: entry.totals || { collections: 0, documents: 0, bytes: 0 },
-    collections: Array.isArray(entry.collections)
-      ? entry.collections.map((collection) => ({
-          name: collection.name,
-          type: collection.type || 'collection',
-          documents: Number(collection.documents) || 0,
-          bytes: Number(collection.bytes) || 0,
-          indexes: Number(collection.indexes) || 0,
-          status: collection.status || 'done',
+    collections: normaliseCollections(entry.collections),
+    // Present only for a run that covered more than one database, so History
+    // can show it the way the form did: a row per database, each opening onto
+    // its own collections.
+    databases: Array.isArray(entry.databases)
+      ? entry.databases.map((database) => ({
+          name: database.name,
+          status: database.status || 'done',
+          totals: database.totals || { collections: 0, documents: 0, bytes: 0 },
+          collections: normaliseCollections(database.collections),
         }))
       : [],
   };

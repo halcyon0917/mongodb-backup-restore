@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld('api', {
   startRestore: (request) => ipcRenderer.invoke('restore:start', request),
   cancelJob: (jobId) => ipcRenderer.invoke('job:cancel', jobId),
 
+  // Connections are pooled for the session; these report and release them.
+  connectionStatus: () => ipcRenderer.invoke('connection:status'),
+  disconnectConnection: (uri) => ipcRenderer.invoke('connection:disconnect', uri),
+
   listHistory: () => ipcRenderer.invoke('history:list'),
   removeHistory: (id) => ipcRenderer.invoke('history:remove', id),
   clearHistory: () => ipcRenderer.invoke('history:clear'),
@@ -43,6 +47,12 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('job:event', handler);
     return () => ipcRenderer.removeListener('job:event', handler);
+  },
+
+  onConnectionState: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('connection:state', handler);
+    return () => ipcRenderer.removeListener('connection:state', handler);
   },
 
   onWindowState: (callback) => {

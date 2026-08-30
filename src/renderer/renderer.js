@@ -15,14 +15,28 @@ const state = {
 
   settings: { prefs: {}, profiles: [], encryptionAvailable: false },
   activeProfileId: null,
-  // Profiles that have answered this session, so the sidebar dot means
-  // "this one really is reachable" rather than "this one was typed in".
-  liveProfiles: new Set(),
+  // uri -> { status, serverVersion, topology, error }, pushed by the main
+  // process from the driver's own topology monitoring. The sidebar dot reads
+  // from here, so it means "this server is reachable now" rather than "a
+  // handshake succeeded at some point".
+  connections: new Map(),
+
+  // Databases chosen for the next backup. Empty until the user picks: nothing
+  // is selected for them on connect.
+  selectedDatabases: [],
+  // 'none' | 'collections' | 'databases' — what the Collections card is listing.
+  backupListMode: 'none',
+  // name -> { open, loading, error, collections, selected }
+  //   collections: null until the group is expanded and its list fetched
+  //   selected:    null means "all of them", including any not yet loaded
+  databaseGroups: new Map(),
 
   inspection: null,
   preview: null,
   history: [],
   openRun: null,
+  // "<runId>/<database>" for each expanded database inside an open run.
+  openRunDatabases: new Set(),
 
   lastBackupFolder: null,
   logLines: [],
@@ -151,6 +165,31 @@ function setUri(value, { silent = false } = {}) {
   }
 }
 
+/** The pooled state of a URI, defaulting to "never used". */
+function connectionState(uri) {
+  return (
+    state.connections.get(uri) || {
+      status: 'idle',
+      serverVersion: null,
+      topology: null,
+      error: null,
+    }
+  );
+}
+
+/** True when the connection in the form is live right now. */
+function isConnected() {
+  const uri = currentUri();
+  return Boolean(uri) && connectionState(uri).status === 'connected';
+}
+
+const CONNECTION_LABEL = {
+  idle: 'Not connected',
+  connecting: 'Connecting…',
+  connected: 'Connected',
+  lost: 'Disconnected',
+};
+
 function setConnectionState(stateName, text) {
   for (const id of ['backupConnState', 'restoreConnState']) {
     const badge = $(id);
@@ -159,29 +198,156 @@ function setConnectionState(stateName, text) {
   }
 }
 
+/** Repaint the two connection badges from the pooled state of the form's URI. */
 function refreshConnectionState() {
-  if (!currentUri()) setConnectionState('idle', 'No connection');
+  const uri = currentUri();
+  if (!uri) {
+    setConnectionState('idle', 'No connection');
+    return;
+  }
+  const entry = connectionState(uri);
+  if (entry.status === 'connected') {
+    setConnectionState(
+      'ok',
+      entry.serverVersion ? `Connected · MongoDB ${entry.serverVersion}` : 'Connected'
+    );
+  } else if (entry.status === 'lost') {
+    setConnectionState('error', 'Disconnected');
+  } else if (entry.status === 'connecting') {
+    setConnectionState('idle', 'Connecting…');
+  } else {
+    setConnectionState('idle', 'Not connected');
+  }
+}
+
+/**
+ * Apply a connection state pushed from the main process.
+ *
+ * These arrive unprompted — the driver notices a server going away or coming
+ * back on its own — so everything that depends on being connected is refreshed
+ * from here rather than only after a user action.
+ */
+function applyConnectionState(payload) {
+  const previous = connectionState(payload.uri).status;
+  state.connections.set(payload.uri, {
+    status: payload.status,
+    serverVersion: payload.serverVersion,
+    topology: payload.topology,
+    error: payload.error,
+  });
+
+  if (payload.uri === currentUri() && payload.status !== previous) {
+    if (payload.status === 'lost') {
+      log('warn', `Lost the connection to ${hostFromUri(payload.uri) || 'the server'}.`);
+    } else if (payload.status === 'connected' && previous === 'lost') {
+      log('success', `Reconnected to ${hostFromUri(payload.uri) || 'the server'}.`);
+    }
+  }
+
+  renderConnections();
+  renderConnectList();
+  refreshConnectionState();
+  refreshGate();
+  refreshActionBar();
 }
 
 /* ───────────────────────────── navigation ───────────────────────────── */
 
+/** Views that cannot show anything truthful without a live connection. */
+const NEEDS_CONNECTION = new Set(['backup', 'restore']);
+
 function setView(name) {
-  state.view = name;
+  // Asking for a view that needs a server without one lands on the gate, and
+  // the nav highlight follows, so the app never claims to be somewhere it is
+  // not.
+  const target = NEEDS_CONNECTION.has(name) && !isConnected() ? 'connect' : name;
+  state.view = target;
 
   for (const button of document.querySelectorAll('.nav')) {
-    const active = button.dataset.view === name;
+    const active = button.dataset.view === target;
     button.classList.toggle('is-active', active);
     button.setAttribute('aria-selected', String(active));
   }
   for (const view of document.querySelectorAll('.view')) {
-    view.classList.toggle('is-active', view.id === `view-${name}`);
+    view.classList.toggle('is-active', view.id === `view-${target}`);
   }
 
   refreshFlow();
   refreshActionBar();
-  savePrefs({ view: name });
+  // Only a real destination is worth remembering; the gate is a waiting room.
+  if (target !== 'connect') savePrefs({ view: target });
 
-  if (name === 'history') loadHistory();
+  if (target === 'connect') renderConnectList();
+  if (target === 'history') loadHistory();
+}
+
+/**
+ * Open or close the gate as the connection comes and goes.
+ *
+ * Called whenever a connection changes state, so losing the server mid-session
+ * puts the app back on the picker rather than leaving a form that cannot run.
+ */
+function refreshGate() {
+  const connected = isConnected();
+
+  for (const button of document.querySelectorAll('.nav')) {
+    if (NEEDS_CONNECTION.has(button.dataset.view)) button.disabled = !connected;
+  }
+
+  if (!connected && NEEDS_CONNECTION.has(state.view)) {
+    setView('connect');
+  } else if (connected && state.view === 'connect') {
+    setView(state.settings.prefs.view === 'restore' ? 'restore' : 'backup');
+  } else if (state.view === 'connect') {
+    renderConnectList();
+  }
+}
+
+/** The saved connections, as the gate's own list. */
+function renderConnectList() {
+  const list = $('connectList');
+  list.textContent = '';
+
+  const profiles = state.settings.profiles;
+  $('connectNote').textContent = profiles.length
+    ? 'History stays readable without a connection.'
+    : '';
+
+  if (profiles.length === 0) {
+    list.appendChild(
+      el(
+        'p',
+        'connect-empty',
+        state.settings.encryptionAvailable
+          ? 'No connections saved yet. Add one to get started — the connection string is encrypted for your Windows account.'
+          : 'Windows credential encryption is unavailable on this machine, so connections cannot be saved.'
+      )
+    );
+    return;
+  }
+
+  for (const profile of profiles) {
+    const entry = connectionState(profile.uri);
+    const row = el('button', 'connect-row');
+    row.type = 'button';
+    row.dataset.status = entry.status;
+
+    const body = el(
+      'div',
+      'connect-body',
+      el('div', 'connect-name', profile.name),
+      el('div', 'connect-host', hostFromUri(profile.uri) || 'no host')
+    );
+
+    row.append(
+      el('span', 'conn-dot'),
+      body,
+      el('span', 'connect-state', CONNECTION_LABEL[entry.status] || '')
+    );
+    if (profile.production) row.append(el('span', 'conn-prod', 'PROD'));
+    row.addEventListener('click', () => selectConnection(profile));
+    list.appendChild(row);
+  }
 }
 
 /** The strip that names which way the data is about to move. */
@@ -200,6 +366,10 @@ function refreshFlow() {
     $('flowFrom').textContent = 'Past runs';
     $('flowTo').textContent = 'this machine';
     $('flowDesc').textContent = 'Everything this app has run, newest first.';
+  } else if (state.view === 'connect') {
+    $('flowFrom').textContent = 'No connection';
+    $('flowTo').textContent = 'nothing to run';
+    $('flowDesc').textContent = 'Choose a server before backing up or restoring.';
   } else {
     $('flowFrom').textContent = 'MongoDB';
     $('flowTo').textContent = 'folder on disk';
@@ -251,9 +421,10 @@ function renderConnections() {
   for (const profile of state.settings.profiles) {
     // A row is two controls, not one: choosing the connection and editing it
     // are different actions, and a button cannot legally contain a button.
+    const entry = connectionState(profile.uri);
     const row = el('div', 'conn');
+    row.dataset.status = entry.status;
     if (profile.id === state.activeProfileId) row.classList.add('is-active');
-    if (state.liveProfiles.has(profile.id)) row.classList.add('is-live');
     if (profile.production) row.classList.add('is-production');
 
     const body = el(
@@ -265,7 +436,7 @@ function renderConnections() {
 
     const main = el('button', 'conn-main', el('span', 'conn-dot'), body);
     main.type = 'button';
-    main.title = `Connect using "${profile.name}"`;
+    main.title = `${CONNECTION_LABEL[entry.status] || ''} — ${profile.name}`;
     main.addEventListener('click', () => selectConnection(profile));
     if (profile.production) main.append(el('span', 'conn-prod', 'PROD'));
 
@@ -300,22 +471,34 @@ function isProductionConnection() {
  * this costs a single handshake.
  */
 async function selectConnection(profile) {
+  const uri = profile.uri || '';
+  const alreadyLive = connectionState(uri).status === 'connected';
+
   state.activeProfileId = profile.id;
-  setUri(profile.uri || '', { silent: true });
+  setUri(uri, { silent: true });
+  // A different server means a different set of databases; nothing carries over.
+  clearDatabaseSelection();
   state.collections.key = null;
-  if (profile.database && !$('backupDatabase').value.trim()) {
-    $('backupDatabase').value = profile.database;
-    refreshResolvedPath();
-  }
+
   renderConnections();
+  renderConnectList();
+  refreshConnectionState();
   refreshFlow();
   refreshDestructiveUi();
-  log('system', `Loaded saved connection "${profile.name}".`);
 
-  const connected = await connect({ label: profile.name });
-  if (connected) state.liveProfiles.add(profile.id);
-  else state.liveProfiles.delete(profile.id);
-  renderConnections();
+  // Going back to a connection that is still open costs nothing and must not
+  // pretend to reconnect — that was the point of pooling them.
+  if (alreadyLive) {
+    log('system', `Switched to "${profile.name}" — still connected.`);
+    await refreshDatabaseList();
+    refreshGate();
+    refreshActionBar();
+    return;
+  }
+
+  log('system', `Connecting to "${profile.name}"…`);
+  await connect({ label: profile.name });
+  refreshGate();
 }
 
 /* ─────────────────────── add / edit connection ─────────────────────── */
@@ -348,7 +531,6 @@ function openConnectionDialog(profile = null) {
     : 'Saved on this machine, encrypted for your Windows account.';
 
   $('connectionName').value = profile ? profile.name : '';
-  $('connectionDatabase').value = profile ? profile.database || '' : '';
   $('connectionProduction').checked = profile ? Boolean(profile.production) : false;
 
   // A new connection starts from whatever URI is in the form, but only when it
@@ -399,7 +581,6 @@ async function saveConnectionFromDialog() {
         id: editing ? editing.id : undefined,
         name,
         uri,
-        database: $('connectionDatabase').value.trim(),
         production: $('connectionProduction').checked,
       })
     );
@@ -409,9 +590,13 @@ async function saveConnectionFromDialog() {
     // Editing the connection currently in use has to move the form with it,
     // or the app would keep talking to the old server under the new name.
     if (editing && saved && state.activeProfileId === editing.id && saved.uri !== currentUri()) {
+      // The URI changed under the connection in use: let go of the old socket
+      // and start again rather than leaving a pooled client nothing points at.
+      await window.api.disconnectConnection(editing.uri).catch(() => {});
+      state.connections.delete(editing.uri);
       setUri(saved.uri, { silent: true });
+      clearDatabaseSelection();
       state.collections.key = null;
-      state.liveProfiles.delete(editing.id);
     }
     if (saved && (!editing || state.activeProfileId === editing.id)) {
       state.activeProfileId = editing ? saved.id : state.activeProfileId;
@@ -470,9 +655,14 @@ async function deleteConnectionFromDialog() {
 
   try {
     state.settings = unwrap(await window.api.deleteProfile(editing.id));
-    state.liveProfiles.delete(editing.id);
+    // Nothing points at this server any more, so hand the socket back.
+    await window.api.disconnectConnection(editing.uri).catch(() => {});
+    state.connections.delete(editing.uri);
     if (state.activeProfileId === editing.id) state.activeProfileId = null;
     renderConnections();
+    renderConnectList();
+    refreshConnectionState();
+    refreshGate();
     refreshFlow();
     refreshDestructiveUi();
     $('connectionDialog').close();
@@ -496,7 +686,7 @@ function wireConnectionDialog() {
   });
 
   // Enter saves from either text field, the way a small form should.
-  for (const id of ['connectionName', 'connectionUri', 'connectionDatabase']) {
+  for (const id of ['connectionName', 'connectionUri']) {
     $(id).addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -529,7 +719,7 @@ function savePrefs(partial) {
  *
  * The input stays free text — a name that is not in the list is still valid.
  */
-function createCombobox(input, { emptyLabel = 'No matching database' } = {}) {
+function createCombobox(input, { emptyLabel = 'No matching database', multiple = false, onChange = null } = {}) {
   const popup = el('div', 'combo-popup');
   popup.setAttribute('role', 'listbox');
   popup.hidden = true;
@@ -550,6 +740,10 @@ function createCombobox(input, { emptyLabel = 'No matching database' } = {}) {
   // committed name filters the list down to itself and there is no way to
   // browse to a different database without clearing the field first.
   let isSearching = false;
+
+  // In multi-select the field is a filter, never a committed value, so what is
+  // typed always narrows the list and what is chosen lives in chips instead.
+  const chosenNames = () => (multiple ? state.selectedDatabases : [input.value.trim()]);
 
   function position() {
     const rect = input.getBoundingClientRect();
@@ -574,22 +768,42 @@ function createCombobox(input, { emptyLabel = 'No matching database' } = {}) {
     if (active) active.scrollIntoView({ block: 'nearest' });
   }
 
+  /** Offer a name the server did not list — a restricted account may still
+   *  be able to read it even though it cannot enumerate databases. */
+  function appendCustomOption() {
+    const typed = input.value.trim();
+    if (!multiple || !typed || items.some((item) => item.name === typed)) return;
+    const custom = el('div', 'combo-option');
+    custom.setAttribute('role', 'option');
+    custom.dataset.custom = 'true';
+    custom.append(el('span', 'combo-tick', ''), el('span', 'combo-name', `Use "${typed}"`));
+    custom.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      toggleName(typed);
+    });
+    popup.appendChild(custom);
+  }
+
   function render() {
     popup.textContent = '';
 
     if (matches.length === 0) {
       popup.appendChild(el('div', 'combo-empty', emptyLabel));
+      appendCustomOption();
       return;
     }
 
-    const chosen = input.value.trim().toLowerCase();
+    const chosen = new Set(chosenNames().map((name) => String(name).toLowerCase()));
 
     matches.forEach((item, index) => {
-      const isChosen = item.name.toLowerCase() === chosen;
+      const isChosen = chosen.has(item.name.toLowerCase());
       const option = el('div', 'combo-option');
       if (index === activeIndex) option.classList.add('is-active');
       if (isChosen) option.classList.add('is-chosen');
       option.setAttribute('role', 'option');
+      // Names the row's database, which separates real entries from the
+      // "use this anyway" row below.
+      option.dataset.name = item.name;
       option.setAttribute('aria-selected', String(isChosen));
 
       // A fixed-width tick slot keeps every name on the same left edge.
@@ -607,23 +821,37 @@ function createCombobox(input, { emptyLabel = 'No matching database' } = {}) {
       });
       popup.appendChild(option);
     });
+
+    appendCustomOption();
   }
 
   function applyFilter() {
     const value = input.value.trim().toLowerCase();
     matches =
-      isSearching && value
+      (multiple || isSearching) && value
         ? items.filter((item) => item.name.toLowerCase().includes(value))
         : items.slice();
 
     // Start on whatever is currently chosen, so opening the full list lands on
     // it and arrow keys continue from there rather than jumping to the top.
-    const current = matches.findIndex((item) => item.name.toLowerCase() === value);
+    const first = chosenNames()[0];
+    const current = first
+      ? matches.findIndex((item) => item.name.toLowerCase() === String(first).toLowerCase())
+      : -1;
     activeIndex = current >= 0 ? current : matches.length > 0 ? 0 : -1;
   }
 
+  function toggleName(name) {
+    const at = state.selectedDatabases.indexOf(name);
+    if (at >= 0) state.selectedDatabases.splice(at, 1);
+    else state.selectedDatabases.push(name);
+    if (onChange) onChange();
+    applyFilter();
+    render();
+  }
+
   function open() {
-    if (items.length === 0) return;
+    if (items.length === 0 && !(multiple && input.value.trim())) return;
     isOpen = true;
     popup.hidden = false;
     input.setAttribute('aria-expanded', 'true');
@@ -642,6 +870,11 @@ function createCombobox(input, { emptyLabel = 'No matching database' } = {}) {
   function choose(index) {
     const item = matches[index];
     if (!item) return;
+    if (multiple) {
+      // Stay open: picking several in a row is the point.
+      toggleName(item.name);
+      return;
+    }
     input.value = item.name;
     isSearching = false; // the value is committed; reopening browses again
     input.dispatchEvent(new Event('change'));
@@ -661,6 +894,18 @@ function createCombobox(input, { emptyLabel = 'No matching database' } = {}) {
     applyFilter();
     open();
   });
+
+  if (multiple) {
+    // Backspace on an empty filter takes the last chip off, as a tag field does.
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Backspace' || input.value !== '') return;
+      if (state.selectedDatabases.length === 0) return;
+      state.selectedDatabases.pop();
+      if (onChange) onChange();
+      applyFilter();
+      render();
+    });
+  }
 
   input.addEventListener('blur', () => close());
 
@@ -715,6 +960,10 @@ function createCombobox(input, { emptyLabel = 'No matching database' } = {}) {
       input.focus();
       open();
     },
+    refresh() {
+      applyFilter();
+      if (isOpen) render();
+    },
     has(name) {
       const wanted = String(name).toLowerCase();
       return items.some((item) => item.name.toLowerCase() === wanted);
@@ -759,11 +1008,7 @@ async function connect({ label = null } = {}) {
 
     state.combos.backup.setItems(info.databases);
     state.combos.restore.setItems(info.databases);
-    $('backupDbHint').textContent = `${plural(info.databases.length, 'database')} on this server.`;
-
-    if (info.defaultDatabase && !$('backupDatabase').value.trim()) {
-      $('backupDatabase').value = info.defaultDatabase;
-    }
+    $('backupDbHint').textContent = `${plural(info.databases.length, 'database')} on this server. Pick one or more.`;
 
     log(
       'success',
@@ -773,7 +1018,8 @@ async function connect({ label = null } = {}) {
 
     refreshFlow();
     refreshTargetState();
-    await loadBackupCollections();
+    await refreshBackupCollections();
+    refreshGate();
     refreshActionBar();
     return true;
   } catch (error) {
@@ -784,11 +1030,78 @@ async function connect({ label = null } = {}) {
       $(id).textContent = error.message;
     }
     log('error', label ? `Could not connect using "${label}" — ${error.message}` : `Connection failed — ${error.message}`);
+    renderConnections();
+    renderConnectList();
     return false;
   } finally {
     $('backupTest').disabled = false;
     $('restoreTest').disabled = false;
   }
+}
+
+/**
+ * Re-read the database list on a connection that is already open.
+ *
+ * Switching back to a pooled connection must not look like reconnecting, so
+ * this is the cheap path: one listDatabases over the socket that is already
+ * there, with no handshake and no "Connecting…".
+ */
+async function refreshDatabaseList() {
+  const uri = currentUri();
+  if (!uri) return;
+  try {
+    const databases = unwrap(await window.api.listDatabases(uri));
+    state.combos.backup.setItems(databases);
+    state.combos.restore.setItems(databases);
+    $('backupDbHint').textContent = `${plural(databases.length, 'database')} on this server. Pick one or more.`;
+    refreshTargetState();
+    await refreshBackupCollections();
+  } catch (error) {
+    log('warn', `Could not list databases — ${error.message}`);
+  }
+}
+
+/* ─────────────────────── database selection (backup) ───────────────── */
+
+function clearDatabaseSelection() {
+  state.selectedDatabases = [];
+  $('backupDatabase').value = '';
+  refreshDatabaseChips();
+}
+
+/** The chips inside the Databases field, one per chosen database. */
+function refreshDatabaseChips() {
+  const chips = $('backupDatabaseChips');
+  chips.textContent = '';
+
+  for (const name of state.selectedDatabases) {
+    const remove = el('button', 'chip-remove', '×');
+    remove.type = 'button';
+    remove.title = `Remove ${name}`;
+    remove.setAttribute('aria-label', `Remove ${name}`);
+    remove.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      state.selectedDatabases = state.selectedDatabases.filter((entry) => entry !== name);
+      onDatabaseSelectionChanged();
+    });
+    chips.appendChild(el('span', 'chip', el('span', 'chip-name', name), remove));
+  }
+
+  // The placeholder is the instruction, so it only belongs on an empty field.
+  $('backupDatabase').placeholder = state.selectedDatabases.length
+    ? 'Add another…'
+    : 'Select database';
+}
+
+function onDatabaseSelectionChanged() {
+  if (state.running) return; // the list is the progress display while a job runs
+  refreshDatabaseChips();
+  if (state.combos.backup) state.combos.backup.refresh();
+  savePrefs({ backupDatabases: state.selectedDatabases });
+  refreshResolvedPath();
+  refreshBackupCollections();
+  refreshActionBar();
 }
 
 /* ─────────────────────────── collection lists ──────────────────────── */
@@ -844,17 +1157,48 @@ function renderCollectionList(containerId, items, emptyMessage = 'No collections
 }
 
 function collectionRows(containerId) {
-  return [...$(containerId).querySelectorAll('.collection')];
+  // Only top-level rows: collections nested inside a database group belong to
+  // that group's own selection, not to this list.
+  return [...$(containerId).querySelectorAll(':scope > .collection')];
+}
+
+/**
+ * The rows a run reports progress against.
+ *
+ * One database means one row per collection. Several means one row per
+ * database, which is the group's head — it carries the same data-name and
+ * progress bar, so none of the job plumbing has to know the difference.
+ */
+function progressRows(containerId) {
+  return [
+    ...$(containerId).querySelectorAll(':scope > .collection, :scope > .dbgroup > .dbgroup-head'),
+  ];
 }
 
 function checkedNames(containerId) {
   return collectionRows(containerId)
-    .filter((row) => row.querySelector('input').checked)
+    .filter((row) => {
+      // Database rows carry no checkbox: each is taken whole.
+      const box = row.querySelector('input');
+      return box ? box.checked : true;
+    })
     .map((row) => row.dataset.name);
+}
+
+/** A collection list per database, or null where the whole database goes. */
+function databaseSelections() {
+  const selections = {};
+  for (const name of state.selectedDatabases) {
+    const group = groupFor(name);
+    selections[name] = group.selected === null ? null : [...group.selected];
+  }
+  return selections;
 }
 
 /** Returns null when everything is selected, so the engine takes all of it. */
 function selectedCollections(containerId) {
+  // Several databases carry their choices per group instead.
+  if (containerId === 'backupCollections' && state.backupListMode !== 'collections') return null;
   const rows = collectionRows(containerId);
   if (rows.length === 0) return null;
   const checked = checkedNames(containerId);
@@ -862,8 +1206,17 @@ function selectedCollections(containerId) {
 }
 
 function setAllChecked(containerId, checked) {
+  if (containerId === 'backupCollections' && state.backupListMode === 'databases') {
+    for (const name of state.selectedDatabases) {
+      groupFor(name).selected = checked ? null : new Set();
+    }
+    renderDatabaseList(state.selectedDatabases);
+    refreshActionBar();
+    return;
+  }
   for (const row of collectionRows(containerId)) {
-    row.querySelector('input').checked = checked;
+    const box = row.querySelector('input');
+    if (box) box.checked = checked;
   }
   refreshCollectionFooter(containerId);
   if (containerId === 'restoreCollections') clearPreview();
@@ -871,9 +1224,29 @@ function setAllChecked(containerId, checked) {
 }
 
 function refreshCollectionFooter(containerId) {
-  const rows = collectionRows(containerId);
+  if (containerId === 'backupCollections') {
+    $('backupCollectionsTitle').textContent =
+      state.backupListMode === 'databases' ? 'Databases' : 'Collections';
+  }
+  const rows =
+    containerId === 'backupCollections' && state.backupListMode === 'databases'
+      ? progressRows(containerId)
+      : collectionRows(containerId);
   const selected = checkedNames(containerId).length;
   const footer = $(`${containerId}Footer`);
+
+  if (containerId === 'backupCollections' && state.backupListMode === 'databases') {
+    const names = state.selectedDatabases;
+    const narrowed = names.filter((name) => groupFor(name).selected !== null);
+    const empty = names.filter((name) => isGroupEmpty(name));
+    footer.textContent = empty.length
+      ? `Nothing selected in ${empty.map((name) => `"${name}"`).join(', ')}.`
+      : `${plural(names.length, 'database')} into a single run folder` +
+        (narrowed.length
+          ? ` · ${narrowed.length} narrowed to specific collections.`
+          : ' · every collection in each one.');
+    return;
+  }
 
   if (rows.length === 0) {
     footer.textContent =
@@ -891,7 +1264,7 @@ function refreshCollectionFooter(containerId) {
 
 /** Move one collection row's progress bar and right-hand figure. */
 function updateCollectionRow(containerId, name, payload) {
-  const row = $(containerId).querySelector(`.collection[data-name="${CSS.escape(name)}"]`);
+  const row = progressRows(containerId).find((entry) => entry.dataset.name === name);
   if (!row) return;
 
   const meta = row.querySelector('.collection-meta');
@@ -921,7 +1294,7 @@ function updateCollectionRow(containerId, name, payload) {
 }
 
 function resetCollectionProgress(containerId) {
-  for (const row of collectionRows(containerId)) {
+  for (const row of progressRows(containerId)) {
     const bar = row.querySelector('.collection-bar');
     bar.style.width = '0';
     bar.style.opacity = '0';
@@ -929,21 +1302,267 @@ function resetCollectionProgress(containerId) {
   }
 }
 
-/**
- * Fill the backup Collections card with the chosen database's collections.
- *
- * Runs whenever a database is committed (picked from the list, typed and
- * blurred, or after a successful connection) so the list is simply there
- * rather than behind a button press. Repeats for the same database are skipped,
- * which also preserves any boxes that have been unticked.
- */
-async function loadBackupCollections({ force = false } = {}) {
+function groupFor(name) {
+  let group = state.databaseGroups.get(name);
+  if (!group) {
+    // A database starts fully included: opening it is how you narrow it down,
+    // so nothing has to be fetched until someone wants to.
+    group = { open: false, loading: false, error: null, collections: null, selected: null };
+    state.databaseGroups.set(name, group);
+  }
+  return group;
+}
+
+/** Forget groups for databases that are no longer selected. */
+function pruneDatabaseGroups(names) {
+  const keep = new Set(names);
+  for (const name of [...state.databaseGroups.keys()]) {
+    if (!keep.has(name)) state.databaseGroups.delete(name);
+  }
+}
+
+/** How many of a database's collections are going into the run. */
+function groupSummary(name) {
+  const group = groupFor(name);
+  // "all" reads the same whether or not the list has been fetched, so a
+  // collapsed group never looks like it is already narrowed.
+  if (group.selected === null) {
+    return group.collections
+      ? `all ${plural(group.collections.length, 'collection')}`
+      : 'all collections';
+  }
+  const total = group.collections ? group.collections.length : group.selected.size;
+  return `${group.selected.size} of ${total} collections`;
+}
+
+function isGroupEmpty(name) {
+  const group = groupFor(name);
+  return group.selected !== null && group.selected.size === 0;
+}
+
+/** Read a database's collections, once, the first time it is opened. */
+async function loadGroupCollections(name) {
+  const group = groupFor(name);
+  if (group.collections || group.loading) return;
   const uri = currentUri();
-  const database = $('backupDatabase').value.trim();
-  if (!uri || !database) return;
+  if (!uri) return;
+
+  group.loading = true;
+  group.error = null;
+  renderDatabaseList(state.selectedDatabases);
+
+  try {
+    group.collections = unwrap(await window.api.listCollections(uri, name));
+  } catch (error) {
+    group.error = error.message;
+  } finally {
+    group.loading = false;
+    // The selection may have moved on while this was in flight.
+    if (state.selectedDatabases.includes(name)) {
+      renderDatabaseList(state.selectedDatabases);
+      refreshActionBar();
+    }
+  }
+}
+
+function toggleGroupCollection(name, collection) {
+  const group = groupFor(name);
+  const all = (group.collections || []).map((entry) => entry.name);
+  // "All" is stored as null; narrowing it turns it into a real set first.
+  if (group.selected === null) group.selected = new Set(all);
+  if (group.selected.has(collection)) group.selected.delete(collection);
+  else group.selected.add(collection);
+  // Back to everything is back to null, so collections added on the server
+  // later are still included.
+  if (all.length > 0 && group.selected.size === all.length) group.selected = null;
+  renderDatabaseList(state.selectedDatabases);
+  refreshActionBar();
+}
+
+function setGroupAll(name, on) {
+  const group = groupFor(name);
+  group.selected = on ? null : new Set();
+  renderDatabaseList(state.selectedDatabases);
+  refreshActionBar();
+}
+
+function chevronIcon(className) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 10 6');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add(className);
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', 'M1 1l4 4 4-4');
+  path.setAttribute('stroke', 'currentColor');
+  path.setAttribute('stroke-width', '1.4');
+  path.setAttribute('stroke-linecap', 'round');
+  path.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(path);
+  return svg;
+}
+
+/**
+ * One collapsible group per selected database.
+ *
+ * The head doubles as that database's progress bar during a run, which is why
+ * it carries the same data-name and .collection-bar a single-database row does.
+ */
+function renderDatabaseList(names) {
+  const container = $('backupCollections');
+
+  // The list is rebuilt on every tick, which would otherwise drop keyboard
+  // focus on the box that was just clicked and leave the user's place lost.
+  const focused = document.activeElement;
+  const restore =
+    focused && container.contains(focused) && focused.closest('.collection')
+      ? {
+          database: focused.closest('.collection').dataset.database,
+          name: focused.closest('.collection').dataset.name,
+        }
+      : null;
+
+  container.textContent = '';
+
+  for (const name of names) {
+    const group = groupFor(name);
+    const known = state.combos.backup ? state.combos.backup.find(name) : null;
+
+    const block = el('div', 'dbgroup');
+    if (group.open) block.classList.add('is-open');
+    block.dataset.name = name;
+
+    const toggle = el('button', 'dbgroup-toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', String(group.open));
+    toggle.append(chevronIcon('dbgroup-chevron'), el('span', 'collection-name', name));
+    toggle.addEventListener('click', () => {
+      group.open = !group.open;
+      renderDatabaseList(names);
+      if (group.open) loadGroupCollections(name);
+    });
+
+    const head = el('div', 'dbgroup-head');
+    head.dataset.name = name;
+    head.append(
+      toggle,
+      el('span', 'collection-docs', groupSummary(name)),
+      el('span', 'collection-meta', known && known.sizeOnDisk ? formatBytes(known.sizeOnDisk) : '—'),
+      el('span', 'collection-bar')
+    );
+    block.appendChild(head);
+
+    const body = el('div', 'dbgroup-body');
+
+    if (group.loading) {
+      body.appendChild(el('p', 'dbgroup-note', 'Reading collections…'));
+    } else if (group.error) {
+      body.appendChild(el('p', 'dbgroup-note error', group.error));
+    } else if (group.collections && group.collections.length === 0) {
+      body.appendChild(el('p', 'dbgroup-note', `"${name}" has no collections to back up.`));
+    } else if (group.collections) {
+      const actions = el('div', 'dbgroup-actions');
+      const all = el('button', 'link', 'All');
+      all.type = 'button';
+      all.addEventListener('click', () => setGroupAll(name, true));
+      const none = el('button', 'link dim', 'None');
+      none.type = 'button';
+      none.addEventListener('click', () => setGroupAll(name, false));
+      actions.append(all, none);
+
+      for (const item of group.collections) {
+        const included = group.selected === null || group.selected.has(item.name);
+        const row = el('label', 'collection');
+        row.dataset.name = item.name;
+        row.dataset.database = name;
+
+        const box = el('input');
+        box.type = 'checkbox';
+        box.checked = included;
+        box.addEventListener('change', () => toggleGroupCollection(name, item.name));
+
+        row.append(
+          box,
+          el('span', 'collection-name', item.type === 'view' ? `${item.name} (view)` : item.name),
+          el(
+            'span',
+            'collection-docs',
+            typeof item.documents === 'number' ? `${formatNumber(item.documents)} docs` : ''
+          ),
+          el('span', 'collection-meta', item.bytes ? formatBytes(item.bytes) : '—')
+        );
+        body.appendChild(row);
+      }
+
+      if (isGroupEmpty(name)) {
+        body.appendChild(
+          el('p', 'dbgroup-note error', `Nothing selected in "${name}" — it would be skipped.`)
+        );
+      }
+      body.appendChild(actions);
+    }
+
+    block.appendChild(body);
+    container.appendChild(block);
+  }
+
+  if (restore) {
+    const again = container.querySelector(
+      `.collection[data-database="${CSS.escape(restore.database)}"][data-name="${CSS.escape(restore.name)}"] input`
+    );
+    if (again) again.focus();
+  }
+
+  refreshCollectionFooter('backupCollections');
+}
+
+/**
+ * Fill the backup Collections card for whatever is selected.
+ *
+ * Nothing selected says so rather than showing an empty list. One database
+ * lists its collections, all ticked. Several list the databases themselves —
+ * each is taken whole, so there is nothing to tick and nowhere sensible to put
+ * a row per collection.
+ */
+async function refreshBackupCollections({ force = false } = {}) {
+  const uri = currentUri();
+  const names = state.selectedDatabases;
+
+  // Leaving collections mode has to invalidate any listCollections still in
+  // flight. Picking a second database while the first one's collections are
+  // loading would otherwise let that late reply paint collection rows over the
+  // database rows — the card and the footer would disagree.
+  if (names.length !== 1) {
+    state.collections.token += 1;
+    state.collections.key = null;
+  }
+
+  if (names.length === 0) {
+    state.backupListMode = 'none';
+    pruneDatabaseGroups(names);
+    renderCollectionList(
+      'backupCollections',
+      [],
+      'No database selected yet — pick one above to list its collections.'
+    );
+    refreshActionBar();
+    return;
+  }
+
+  if (names.length > 1) {
+    state.backupListMode = 'databases';
+    pruneDatabaseGroups(names);
+    renderDatabaseList(names);
+    refreshActionBar();
+    return;
+  }
+
+  const database = names[0];
+  if (!uri) return;
 
   const key = `${uri} ${database}`;
-  if (!force && key === state.collections.key) return;
+  if (!force && state.backupListMode === 'collections' && key === state.collections.key) return;
+  state.backupListMode = 'collections';
   state.collections.key = key;
 
   const token = state.collections.token + 1;
@@ -971,12 +1590,29 @@ async function loadBackupCollections({ force = false } = {}) {
 
 function refreshResolvedPath() {
   const folder = $('backupOutput').value.trim();
-  const database = $('backupDatabase').value.trim() || 'my_database';
+  const names = state.selectedDatabases;
   const separator = folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\';
   const suffix = $('backupGzip').checked ? '  (.bson.gz)' : '';
-  $('backupResolved').textContent = folder
-    ? `${folder}${separator}${database}_<timestamp>${suffix}`
-    : 'Choose a folder above.';
+
+  if (!folder) {
+    $('backupResolved').textContent = 'Choose a folder above.';
+    return;
+  }
+
+  // Several databases go into one run folder with a subfolder each, so the
+  // preview has to show that rather than implying a folder per database.
+  if (names.length > 1) {
+    $('backupResolved').textContent =
+      `${folder}${separator}backup_<timestamp>\\{ ${names.join(', ')} }${suffix}`;
+    return;
+  }
+
+  if (names.length === 0) {
+    $('backupResolved').textContent = 'Select a database to see the folder this run will create.';
+    return;
+  }
+
+  $('backupResolved').textContent = `${folder}${separator}${names[0]}_<timestamp>${suffix}`;
 }
 
 /* ───────────────────────────── restore view ────────────────────────── */
@@ -1306,7 +1942,7 @@ function handleJobEvent(event) {
       state.progress = { total: event.collections.length, done: 0, fraction: 0 };
       // The engine may have narrowed the plan (views last, filters applied), so
       // only the collections actually in it should show progress.
-      for (const row of collectionRows(listId)) {
+      for (const row of progressRows(listId)) {
         const inPlan = event.collections.some((item) => item.name === row.dataset.name);
         row.style.opacity = inPlan ? '' : '0.45';
       }
@@ -1372,10 +2008,20 @@ const CONFIRM_BLOCKER =
 /** Why the primary button cannot run yet, or null when it can. */
 function backupBlocker() {
   if (!currentUri()) return 'Enter the MongoDB URI to back up from.';
-  if (!$('backupDatabase').value.trim()) return 'Choose the database to back up.';
+  if (state.selectedDatabases.length === 0) return 'Select at least one database to back up.';
   if (!$('backupOutput').value.trim()) return 'Choose a folder to save the backup in.';
-  if (collectionRows('backupCollections').length > 0 && checkedNames('backupCollections').length === 0) {
+  if (
+    state.backupListMode === 'collections' &&
+    collectionRows('backupCollections').length > 0 &&
+    checkedNames('backupCollections').length === 0
+  ) {
     return 'Pick at least one collection.';
+  }
+  if (state.backupListMode === 'databases') {
+    const empty = state.selectedDatabases.filter((name) => isGroupEmpty(name));
+    if (empty.length > 0) {
+      return `Pick at least one collection in ${empty.map((name) => `"${name}"`).join(', ')}.`;
+    }
   }
   return null;
 }
@@ -1425,7 +2071,8 @@ function refreshActionBar() {
   const primary = $('actionPrimary');
   const secondary = $('actionSecondary');
 
-  if (state.view === 'history') {
+  // Neither of these views has anything to run.
+  if (state.view === 'history' || state.view === 'connect') {
     bar.classList.add('hidden');
     return;
   }
@@ -1440,7 +2087,7 @@ function refreshActionBar() {
   if (state.running) {
     const isBackup = state.running === 'backup';
     const name = isBackup
-      ? $('backupDatabase').value.trim()
+      ? state.selectedDatabases.join(', ') || 'the database'
       : $('restoreTargetDatabase').value.trim();
     title.textContent = `${isBackup ? 'Backing up' : 'Restoring into'} ${name}…`;
     detail.textContent =
@@ -1456,18 +2103,30 @@ function refreshActionBar() {
     const blocker = backupBlocker();
     const selected = checkedNames('backupCollections').length;
     const rows = collectionRows('backupCollections');
+    // Database rows carry no checkbox, so this asks for the ticked names
+    // rather than assuming every row has one.
+    const ticked = new Set(checkedNames('backupCollections'));
     const documents = rows
-      .filter((row) => row.querySelector('input').checked)
+      .filter((row) => ticked.has(row.dataset.name))
       .reduce((total, row) => total + (Number(row.dataset.documents) || 0), 0);
 
     const finished = applyOutcome('backup', title, detail);
     if (!finished) {
       title.textContent = 'Ready to back up';
-      detail.textContent =
-        blocker ||
-        (rows.length > 0
-          ? `${selected} of ${rows.length} collection(s) · ${formatNumber(documents)} document(s)`
-          : `Writes into ${$('backupOutput').value.trim()}`);
+      if (blocker) detail.textContent = blocker;
+      else if (state.backupListMode === 'databases') {
+        const narrowed = state.selectedDatabases.filter(
+          (name) => groupFor(name).selected !== null
+        ).length;
+        detail.textContent =
+          `${plural(state.selectedDatabases.length, 'database')} · ` +
+          (narrowed ? `${narrowed} narrowed to specific collections` : 'every collection in each');
+      } else if (rows.length > 0) {
+        detail.textContent =
+          `${selected} of ${rows.length} collection(s) · ${formatNumber(documents)} document(s)`;
+      } else {
+        detail.textContent = `Writes into ${$('backupOutput').value.trim()}`;
+      }
     }
 
     primary.textContent = 'Start backup';
@@ -1523,12 +2182,17 @@ function refreshActionBar() {
 /* ───────────────────────────── backup flow ─────────────────────────── */
 
 async function startBackup() {
+  const databases = [...state.selectedDatabases];
   const request = {
     uri: currentUri(),
-    database: $('backupDatabase').value.trim(),
+    databases,
+    // Kept for anything still reading the older single-database shape.
+    database: databases[0],
     outputDir: $('backupOutput').value.trim(),
     gzip: $('backupGzip').checked,
     includeCollections: selectedCollections('backupCollections'),
+    // One list per database, so each can contribute a different set.
+    selections: state.backupListMode === 'databases' ? databaseSelections() : undefined,
   };
 
   const blocker = backupBlocker();
@@ -1541,11 +2205,27 @@ async function startBackup() {
     await window.api.confirm({
       type: 'question',
       title: 'Start backup',
-      message: `Back up "${request.database}"?`,
+      message:
+        databases.length === 1
+          ? `Back up "${databases[0]}"?`
+          : `Back up ${databases.length} databases?`,
       detail:
+        (databases.length > 1
+          ? `${databases
+              .map((name) => {
+                const group = groupFor(name);
+                return group.selected === null
+                  ? `${name} (all collections)`
+                  : `${name} (${plural(group.selected.size, 'collection')})`;
+              })
+              .join('\n')}\n\n`
+          : '') +
         `Reads from ${hostFromUri(request.uri) || 'the server'} and writes files into:\n` +
         `${request.outputDir}\n\n` +
         (selected ? `Only the ${selected.length} selected collection(s).\n\n` : '') +
+        (databases.length > 1
+          ? 'Each database gets its own subfolder inside one run folder.\n\n'
+          : '') +
         'Nothing in the database is changed by a backup.',
       confirmLabel: 'Start backup',
     })
@@ -1556,7 +2236,7 @@ async function startBackup() {
   }
 
   savePrefs({
-    backupDatabase: request.database,
+    backupDatabases: databases,
     backupOutput: request.outputDir,
     backupGzip: request.gzip,
   });
@@ -1565,7 +2245,12 @@ async function startBackup() {
   resetCollectionProgress('backupCollections');
   state.progress = { total: 0, done: 0, fraction: 0 };
   setProgress(0);
-  log('system', `Backup started for "${request.database}".`);
+  log(
+    'system',
+    databases.length === 1
+      ? `Backup started for "${databases[0]}".`
+      : `Backup started for ${databases.length} databases.`
+  );
 
   try {
     const result = await window.api.startBackup(request);
@@ -1577,6 +2262,7 @@ async function startBackup() {
         kind: 'backup',
         status: 'done',
         detail:
+          (totals.databases ? `${plural(totals.databases, 'database')} · ` : '') +
           `${plural(totals.collections, 'collection')} · ` +
           `${formatNumber(totals.documents)} document(s) · ${formatBytes(totals.bytes)} → ` +
           result.summary.outputFolder,
@@ -1596,7 +2282,7 @@ async function startBackup() {
     state.activeJobId = null;
     setRunning(null);
     setProgress(0);
-    for (const row of collectionRows('backupCollections')) row.style.opacity = '';
+    for (const row of progressRows('backupCollections')) row.style.opacity = '';
     loadHistory();
   }
 }
@@ -1749,23 +2435,26 @@ function renderRun(run) {
   const open = state.openRun === run.id;
   if (open) card.classList.add('is-open');
 
-  const chevron = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  chevron.setAttribute('viewBox', '0 0 10 6');
-  chevron.setAttribute('fill', 'none');
-  chevron.classList.add('run-chevron');
-  const chevronPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  chevronPath.setAttribute('d', 'M1 1l4 4 4-4');
-  chevronPath.setAttribute('stroke', 'currentColor');
-  chevronPath.setAttribute('stroke-width', '1.4');
-  chevronPath.setAttribute('stroke-linecap', 'round');
-  chevron.appendChild(chevronPath);
+  const chevron = chevronIcon('run-chevron');
 
-  const detail = [run.host, run.detail].filter(Boolean).join(' · ');
+  // A run over several databases has no single name to show, so the count
+  // goes in the name column and the names themselves go in the detail.
+  const databases = Array.isArray(run.databases) ? run.databases : [];
+  const isMulti = databases.length > 1;
+  const title = isMulti ? plural(databases.length, 'database') : run.database || '—';
+  const detail = [
+    run.host,
+    isMulti ? databases.map((database) => database.name).join(', ') : '',
+    run.detail,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   const head = el(
     'button',
     'run-head',
     el('span', 'run-kind', run.kind === 'backup' ? 'Backup' : 'Restore'),
-    el('span', 'run-db', run.database || '—'),
+    el('span', 'run-db', title),
     el('span', 'run-when', formatWhen(run.finishedAt)),
     el('span', 'run-detail', detail),
     el('span', 'run-size', run.totals && run.totals.bytes ? formatBytes(run.totals.bytes) : '—'),
@@ -1774,7 +2463,13 @@ function renderRun(run) {
   );
   head.type = 'button';
   head.addEventListener('click', () => {
-    state.openRun = state.openRun === run.id ? null : run.id;
+    const closing = state.openRun === run.id;
+    state.openRun = closing ? null : run.id;
+    if (closing) {
+      for (const key of [...state.openRunDatabases]) {
+        if (key.startsWith(`${run.id}/`)) state.openRunDatabases.delete(key);
+      }
+    }
     renderHistory();
   });
   card.appendChild(head);
@@ -1782,19 +2477,71 @@ function renderRun(run) {
   if (!open) return card;
 
   const body = el('div', 'run-body');
-  for (const collection of run.collections) {
-    const stateEl = el('span', 'state', collection.status === 'done' ? 'done' : collection.status);
-    if (collection.status !== 'done') stateEl.classList.add('is-pending');
-    body.appendChild(
-      el(
-        'div',
-        'run-row',
-        el('span', 'name', collection.name),
-        el('span', 'num', `${formatNumber(collection.documents)} docs`),
-        el('span', 'num', collection.bytes ? formatBytes(collection.bytes) : '—'),
-        stateEl
-      )
+
+  /** One line: a collection, or a database inside a multi-database run. */
+  const detailRow = (item, extra) => {
+    const stateEl = el('span', 'state', item.status === 'done' ? 'done' : item.status);
+    if (item.status !== 'done') stateEl.classList.add('is-pending');
+    const row = el(
+      'div',
+      'run-row',
+      el('span', 'name', item.name),
+      el('span', 'num', extra || `${formatNumber(item.documents)} docs`),
+      el('span', 'num', item.bytes ? formatBytes(item.bytes) : '—'),
+      stateEl
     );
+    return row;
+  };
+
+  if (isMulti) {
+    // The same shape the form had: a row per database, opening onto its own
+    // collections, rather than a flat list that hides which database each
+    // collection came from.
+    for (const database of databases) {
+      const key = `${run.id}/${database.name}`;
+      const open = state.openRunDatabases.has(key);
+      const totals = database.totals || {};
+
+      const group = el('div', `run-group${open ? ' is-open' : ''}`);
+      const toggle = el('button', 'run-group-head');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.append(
+        chevronIcon('run-group-chevron'),
+        el('span', 'name', database.name),
+        el(
+          'span',
+          'num',
+          totals.collections ? plural(totals.collections, 'collection') : '—'
+        ),
+        el('span', 'num', `${formatNumber(totals.documents || 0)} docs`),
+        el('span', 'num', totals.bytes ? formatBytes(totals.bytes) : '—'),
+        el('span', `state${database.status === 'done' ? '' : ' is-pending'}`, database.status)
+      );
+      toggle.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (open) state.openRunDatabases.delete(key);
+        else state.openRunDatabases.add(key);
+        renderHistory();
+      });
+      group.appendChild(toggle);
+
+      if (open) {
+        const inner = el('div', 'run-group-body');
+        if (database.collections.length === 0) {
+          inner.appendChild(
+            el('p', 'run-group-note', 'No per-collection detail was recorded for this database.')
+          );
+        } else {
+          for (const collection of database.collections) inner.appendChild(detailRow(collection));
+        }
+        group.appendChild(inner);
+      }
+
+      body.appendChild(group);
+    }
+  } else {
+    for (const collection of run.collections) body.appendChild(detailRow(collection));
   }
 
   if (run.error) body.appendChild(el('div', 'run-error', run.error));
@@ -1815,13 +2562,20 @@ function renderRun(run) {
   }
 
   if (run.kind === 'backup' && run.folder && run.status === 'done') {
-    const restoreThis = el('button', 'btn', 'Restore this');
+    // The restore form reads a dump root as easily as a single database
+    // folder, so a multi-database run loads whole and its picker chooses.
+    const restoreThis = el('button', 'btn', isMulti ? 'Restore from this' : 'Restore this');
     restoreThis.type = 'button';
     restoreThis.addEventListener('click', async () => {
       $('restoreSource').value = run.folder;
       setView('restore');
       await inspectSource(run.folder);
-      log('system', `Loaded "${run.database}" from ${run.folder} into the restore form.`);
+      log(
+        'system',
+        isMulti
+          ? `Loaded ${plural(databases.length, 'database')} from ${run.folder} into the restore form.`
+          : `Loaded "${run.database}" from ${run.folder} into the restore form.`
+      );
     });
     actions.appendChild(restoreThis);
   }
@@ -1949,7 +2703,8 @@ async function init() {
 
     applyTheme(prefs.theme || (appInfo && appInfo.systemTheme) || 'dark');
 
-    if (prefs.backupDatabase) $('backupDatabase').value = prefs.backupDatabase;
+    // Databases are not restored from preferences: which ones exist depends on
+    // the server, and nothing should be selected before one is connected.
     if (prefs.backupOutput) $('backupOutput').value = prefs.backupOutput;
     if (prefs.backupGzip) $('backupGzip').checked = true;
     if (prefs.restoreSource) $('restoreSource').value = prefs.restoreSource;
@@ -1966,11 +2721,25 @@ async function init() {
     log('error', `Could not load settings — ${error.message}`);
   }
 
-  state.combos.backup = createCombobox($('backupDatabase'));
+  state.combos.backup = createCombobox($('backupDatabase'), {
+    multiple: true,
+    onChange: onDatabaseSelectionChanged,
+  });
   state.combos.restore = createCombobox($('restoreTargetDatabase'));
+  refreshDatabaseChips();
+
+  // Clicking the field itself should reach the input, so the picker opens
+  // wherever in the chip area you happen to click.
+  $('backupDatabaseField').addEventListener('mousedown', (event) => {
+    if (event.target === $('backupDatabaseField') || event.target === $('backupDatabaseChips')) {
+      event.preventDefault();
+      $('backupDatabase').focus();
+    }
+  });
 
   /* Sidebar connections */
   $('connectionAdd').addEventListener('click', () => openConnectionDialog(null));
+  $('connectAdd').addEventListener('click', () => openConnectionDialog(null));
 
   /* Backup view */
   $('backupTest').addEventListener('click', () => connect());
@@ -2003,13 +2772,7 @@ async function init() {
     refreshResolvedPath();
     refreshActionBar();
   });
-  $('backupDatabase').addEventListener('input', refreshResolvedPath);
-  $('backupDatabase').addEventListener('change', (event) => {
-    savePrefs({ backupDatabase: event.target.value.trim() });
-    refreshResolvedPath();
-    loadBackupCollections();
-    refreshActionBar();
-  });
+
   $('backupGzip').addEventListener('change', (event) => {
     savePrefs({ backupGzip: event.target.checked });
     refreshResolvedPath();
@@ -2018,6 +2781,7 @@ async function init() {
     setUri(event.target.value.trim(), { silent: true });
     state.collections.key = null;
     state.activeProfileId = null;
+    refreshConnectionState();
     refreshActionBar();
   });
   $('backupUri').addEventListener('change', () => {
@@ -2033,6 +2797,7 @@ async function init() {
     $('backupUri').value = event.target.value.trim();
     state.collections.key = null;
     state.activeProfileId = null;
+    refreshConnectionState();
     refreshActionBar();
   });
   $('restoreUri').addEventListener('change', () => {
@@ -2129,6 +2894,7 @@ async function init() {
     try {
       state.history = unwrap(await window.api.clearHistory());
       state.openRun = null;
+      state.openRunDatabases.clear();
       $('historyCount').textContent = '';
       renderHistory();
       log('system', 'History cleared.');
@@ -2166,18 +2932,41 @@ async function init() {
   });
 
   window.api.onJobEvent(handleJobEvent);
+  window.api.onConnectionState(applyConnectionState);
+
+  // Connections outlive a reload of the page but not the process, so pick up
+  // whatever the main process is already holding.
+  try {
+    for (const entry of unwrap(await window.api.connectionStatus())) {
+      state.connections.set(entry.uri, {
+        status: entry.status,
+        serverVersion: entry.serverVersion,
+        topology: entry.topology,
+        error: entry.error,
+      });
+    }
+  } catch {
+    /* nothing pooled yet */
+  }
 
   refreshResolvedPath();
   refreshConnectionState();
   refreshDestructiveUi();
   await loadHistory();
-  setView((state.settings.prefs && state.settings.prefs.view) || 'backup');
+  renderConnectList();
+  refreshGate();
+  setView(isConnected() ? (state.settings.prefs && state.settings.prefs.view) || 'backup' : 'connect');
 
   if ($('restoreSource').value.trim()) {
     await inspectSource($('restoreSource').value.trim());
   }
 
-  log('system', 'Ready. Enter a MongoDB URI and a database name to begin.');
+  log(
+    'system',
+    state.settings.profiles.length
+      ? 'Ready. Choose a connection to begin.'
+      : 'Ready. Add a connection to begin.'
+  );
   refreshActionBar();
 }
 

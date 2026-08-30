@@ -149,8 +149,30 @@
         </div>
 
         <div class="views">
+          <!-- ─────────────────────────── Connect ─────────────────────────── -->
+          <!-- Shown until a connection is live. Backing up and restoring both
+               need a server, so there is nothing honest to show before one is
+               chosen. History does not, and stays reachable. -->
+          <section class="view is-active" id="view-connect" role="tabpanel" aria-label="Choose a connection">
+            <div class="connect">
+              <div class="connect-head">
+                <h2>Choose a connection</h2>
+                <p id="connectLead">
+                  Back up and Restore both need a server. Pick one below, or add it.
+                </p>
+              </div>
+
+              <div class="connect-list" id="connectList"></div>
+
+              <div class="connect-actions">
+                <button class="btn primary" id="connectAdd">Add a connection</button>
+                <span class="connect-note" id="connectNote"></span>
+              </div>
+            </div>
+          </section>
+
           <!-- ─────────────────────────── Back up ─────────────────────────── -->
-          <section class="view is-active" id="view-backup" role="tabpanel" aria-label="Back up">
+          <section class="view" id="view-backup" role="tabpanel" aria-label="Back up">
             <div class="grid">
               <div class="grid-main">
                 <section class="card">
@@ -177,16 +199,21 @@
                       Supports <code>mongodb://</code> and <code>mongodb+srv://</code> (Atlas).
                     </p>
 
-                    <label class="field-label" for="backupDatabase">Database</label>
+                    <label class="field-label" for="backupDatabase">Databases</label>
                     <div class="row">
-                      <input
-                        type="text"
-                        id="backupDatabase"
-                        class="mono"
-                        spellcheck="false"
-                        autocomplete="off"
-                        placeholder="my_database"
-                      />
+                      <!-- Chips plus a filter box: several databases can go into
+                           one run, and none is chosen for you. -->
+                      <div class="chooser" id="backupDatabaseField">
+                        <span class="chips" id="backupDatabaseChips"></span>
+                        <input
+                          type="text"
+                          id="backupDatabase"
+                          class="mono"
+                          spellcheck="false"
+                          autocomplete="off"
+                          placeholder="Select database"
+                        />
+                      </div>
                       <button class="btn with-chevron" id="backupBrowseDb">
                         Browse
                         <svg viewBox="0 0 10 6" fill="none" aria-hidden="true">
@@ -230,13 +257,13 @@
               <div class="grid-side">
                 <section class="card">
                   <header class="card-head">
-                    <h2>Collections</h2>
+                    <h2 id="backupCollectionsTitle">Collections</h2>
                     <span class="spacer"></span>
                     <button class="link" id="backupSelectAll">All</button>
                     <button class="link dim" id="backupSelectNone">None</button>
                   </header>
                   <div class="collection-list" id="backupCollections">
-                    <p class="empty">Choose a database to list its collections.</p>
+                    <p class="empty">No database selected yet — pick one above to list its collections.</p>
                   </div>
                   <footer class="card-foot" id="backupCollectionsFooter">
                     Everything in the database is backed up unless you narrow it down here.
@@ -523,19 +550,6 @@
           <button class="btn" id="connectionUriReveal" title="Show or hide the URI">Show</button>
         </div>
         <p class="hint">Supports <code>mongodb://</code> and <code>mongodb+srv://</code> (Atlas).</p>
-
-        <label class="field-label" for="connectionDatabase">
-          Default database <span class="optional">optional</span>
-        </label>
-        <input
-          type="text"
-          id="connectionDatabase"
-          class="mono"
-          spellcheck="false"
-          autocomplete="off"
-          placeholder="my_database"
-        />
-        <p class="hint">Filled in for you when this connection is chosen.</p>
 
         <label class="check sheet-check">
           <input type="checkbox" id="connectionProduction" />

@@ -3,7 +3,7 @@
 A Windows desktop app for backing up and restoring MongoDB databases. Paste a
 connection string, name a database, click a button.
 
-- **Back up** — MongoDB URI + source database → a folder on disk.
+- **Back up** — one database, or several at once, → a folder on disk.
 - **Restore** — a backup folder → target database, with a dry run first if you
   want to see what it would do.
 - **History** — every run it has made, including the ones that failed.
@@ -22,6 +22,19 @@ Works with local servers, replica sets, sharded clusters, and MongoDB Atlas
 
 ## Screenshots
 
+**Choosing a connection.** The app opens here rather than on a form it cannot
+run. Each connection reports whether it is reachable *now* — green live, red
+gone, grey never used — because that dot is only worth having if it is true.
+
+![The connection gate listing three saved connections, one connected, one never used and one disconnected](docs/screenshots/connect-gate.png)
+
+**Several databases at once.** The Databases field takes as many as you like.
+With more than one selected the card becomes **Databases** — one collapsible row
+each, opening onto that database's own collections, so every database in a run
+can contribute a different set.
+
+![The Databases card with three databases, one expanded to show its collections with two of three ticked](docs/screenshots/multi-database.png)
+
 **Restoring.** The view carries its own colour and states the direction of
 travel, because running a restore while believing you are running a backup is
 the one mistake worth designing against. Four modes decide what happens to
@@ -39,10 +52,12 @@ inventing precision it does not have.
 
 ![A dry run listing each collection with its document count in the backup, its count in the target, and the outcome](docs/screenshots/dry-run.png)
 
-**History.** Expand a run for its per-collection detail, open its folder, or
-load a backup straight back into the restore form.
+**History.** Expand a run for its detail, open its folder, or load a backup
+straight back into the restore form. A run over several databases opens onto a
+row per database, each carrying its own collections — the same shape the form
+had when the run was set up.
 
-![The History view with a backup and a restore, one expanded to show each collection](docs/screenshots/history.png)
+![The History view with a restore, a two-database backup expanded to show one database's collections, and a single-database backup](docs/screenshots/history.png)
 
 **Connections.** One dialog adds and edits them — name, URI, an optional
 default database, and a **Test** that tries the URI without adopting it as the
@@ -50,11 +65,6 @@ app's connection. A connection can be marked **production**, which flags it red
 in the sidebar and makes every restore into it ask for confirmation in the form.
 
 ![The connection dialog, with the production option ticked, over a sidebar showing three saved connections](docs/screenshots/connection-dialog.png)
-
-**Picking a database.** Type to filter. Opening the list always shows every
-database with the current one ticked, so a chosen name never hides the rest.
-
-![The database picker open over the form, filtered by typing](docs/screenshots/database-picker.png)
 
 **Light theme.** Starts from the Windows setting; the switch in the sidebar
 overrides it and is remembered.
@@ -145,10 +155,32 @@ empty.
 
 ## One connection at a time
 
+The app opens on the connection picker. Back up and Restore both need a server,
+so neither is reachable until one is live; History does not, and stays readable.
+
 The sidebar holds the saved connections, and the URI on the Back up and Restore
 views is the same connection. Choosing a saved one connects and lists its
 databases in a single handshake — which matters on Atlas, where each connect
 carries an SRV lookup and a TLS negotiation.
+
+### What the indicator means
+
+A connection is opened once and then **held for the session**, so going back to
+one you have already used is instant rather than a fresh handshake. That is what
+makes the dot worth reading:
+
+| | |
+| --- | --- |
+| **Green** | reachable right now |
+| **Amber** | connecting |
+| **Red** | was connected, and the server has gone |
+| **Grey** | not used yet this session |
+
+The colour comes from the driver's own topology monitoring rather than from what
+the app last did, so it turns red when a server actually goes away — not when
+the app merely stops talking to it — and back to green by itself when the server
+returns. Losing the server puts the app back on the picker rather than leaving a
+form that cannot run.
 
 Backing up from one server and restoring into another therefore means switching
 connection between the two, rather than keeping two URIs filled in at once. In
@@ -157,8 +189,8 @@ an earlier session: it is stated on the connection card, in the strip along the
 top of the view, and in the confirmation dialog.
 
 **+** adds a connection, and the pencil on a row edits it — both open the same
-dialog: name, URI, an optional default database, and **Test**, which tries the
-URI without adopting it as the app's connection. Editing also offers **Delete**.
+dialog: name, URI, and **Test**, which tries the URI without adopting it as the
+app's connection. Editing also offers **Delete**.
 
 ### Marking a connection as production
 
@@ -185,19 +217,39 @@ Delete that file to reset the app.
 1. Paste the **MongoDB URI**, or pick a saved connection from the sidebar.
    **Test** reports the server version and whether it is a standalone, replica
    set, or sharded cluster.
-2. Choose the **database**. **Browse** opens a picker you can type into to
-   filter — servers with dozens of similarly named databases stay navigable.
-   Opening it always shows every database, with the current one ticked;
-   filtering happens only while you type, so a chosen name never hides the rest.
+2. Choose the **databases**. Nothing is selected for you. **Browse** opens a
+   picker you can type into to filter — servers with dozens of similarly named
+   databases stay navigable — and clicking one adds it as a chip without closing
+   the list, so several can go into one run. A name the server will not list can
+   still be typed and used, which matters for accounts that can read a database
+   but not enumerate them.
 3. Choose where to save it. The card shows the exact folder this run will
-   create — every run gets its own timestamped subfolder
-   (`my_database_2026-08-18_18-30-00`), so a backup never overwrites an earlier
-   one.
+   create, so a backup never overwrites an earlier one.
 4. **Start backup.**
 
-Choosing a database loads its collections into the **Collections** card
-automatically, all selected. Untick any you do not want; those rows double as
-the progress display while the backup runs.
+Selecting **one** database loads its collections into the **Collections** card,
+all ticked; untick any you do not want.
+
+Selecting **several** turns that card into **Databases**: a collapsible row per
+database, each opening onto its own collections with its own tick boxes and its
+own All/None. A database's collections are read only when you open it, so
+selecting a dozen costs nothing until you want to narrow one — an unopened
+database goes in whole. Leaving one with nothing ticked blocks the run and names
+it. During a run those database rows are what fill with progress.
+
+### Where a backup goes
+
+| Selection | Layout |
+| --- | --- |
+| One database | `my_database_2026-08-18_18-30-00/` — unchanged from earlier versions |
+| Several | `backup_2026-08-18_18-30-00/` with `shop/`, `billing/`, … inside |
+
+Two runs started in the same second would collide on that name, so the second
+gets a `-2` suffix rather than writing into the first one's folder.
+
+The second is `mongodump`'s own root layout, so the whole set restores together,
+any single database inside it restores on its own, and `mongorestore` reads it
+too. Each subfolder carries its own manifest as well as one for the run.
 
 ### What a backup folder contains
 
@@ -260,8 +312,13 @@ database.
 ## History
 
 Every run is recorded — completed, failed, or stopped — with how far it got.
-Expand one for its per-collection detail, **Open folder** to see what it wrote,
-or **Restore this** to load a backup straight into the restore form.
+Expand one for its detail, **Open folder** to see what it wrote, or **Restore
+this** to load a backup straight into the restore form.
+
+A single-database run opens onto its collections. A run over several is listed
+as *“3 databases”*, with their names beside it, and opens onto a collapsible row
+per database holding that database's own collections — so a run where one
+database was narrowed and another taken whole reads back exactly that way.
 
 Runs are kept in `%APPDATA%\MongoDB Backup and Restore\history.json`, capped at
 the last 60. It records the **host** a run talked to but never the connection
@@ -291,11 +348,11 @@ default; pass a URI as an argument to point elsewhere):
 
 | Script | What it proves |
 | --- | --- |
-| `npm run test:engines` | Seeds a database covering every awkward BSON type, backs it up, restores it, and compares the **raw BSON bytes** of every document plus index definitions — plain and gzipped. Also covers duplicate handling, merge mode, renamed targets, filename escaping for collection names that are illegal as Windows filenames, capped collections, views, and input validation. |
+| `npm run test:engines` | Seeds a database covering every awkward BSON type, backs it up, restores it, and compares the **raw BSON bytes** of every document plus index definitions — plain and gzipped. Also covers duplicate handling, merge mode, renamed targets, filename escaping for collection names that are illegal as Windows filenames, capped collections, views, input validation, and multi-database runs: the folder layout, a manifest per database, reading the set back as one dump root, restoring each database out of it, a different collection list per database, and the guard against two runs in the same second sharing a folder. |
 | `npm run test:srv` | Covers the Atlas SRV/DNS fallback: seed-list URI composition, TXT-option precedence, the rule that a TXT record cannot downgrade TLS, rejection of SRV hosts outside the cluster domain, and DNS-error classification. Pass a cluster hostname (`npm run test:srv -- cluster0.xxx.mongodb.net`) to also run a live check that black-holes the system resolver and confirms the fallback still resolves the cluster. |
 | `npm run test:compat` | Round-trips against the official tools: our backup → `mongorestore`, and `mongodump` → our restore. Skipped with a notice if the CLI tools are not on PATH. |
-| `npm run test:ui` | Boots the real app under Electron and asserts the preload bridge, DOM wiring, and IPC round trips work, with no renderer console errors. Also covers the frameless window's own title bar and drag regions, that the bundled fonts really loaded under the CSP, that both themes repaint, that the picker stays height-capped and filterable with 45 databases, that the action bar stays pinned above the log dock while the form scrolls, that a destructive restore stays blocked until its confirmation is ticked, and that a saved connection string is never written to disk in plain text. The connection dialog gets its own run through: **+** opens empty even with a connection selected and adds a second rather than renaming it, a duplicate name is refused, the row's pencil opens the dialog filled in and renames in place, and a production connection forces the confirmation even in the safe mode. |
-| `npm run test:e2e` | Fills in the actual form fields and clicks the actual buttons, then verifies the data landed in MongoDB. Covers the sidebar connecting on one click, a chosen database auto-loading its collections, per-collection progress reaching completion, a dry run reporting the target's real counts and writing nothing, and both runs landing in History with the host but no connection string — checked against the file on disk. |
+| `npm run test:ui` | Boots the real app under Electron and asserts the preload bridge, DOM wiring, and IPC round trips work, with no renderer console errors. Also covers the frameless window's own title bar and drag regions, that the bundled fonts really loaded under the CSP, that both themes repaint, that the picker stays height-capped and filterable with 45 databases, that the action bar stays pinned above the log dock while the form scrolls, that a destructive restore stays blocked until its confirmation is ticked, and that a saved connection string is never written to disk in plain text. Also that the app opens on the connection gate with Back up and Restore held back and History reachable, that no database is preselected, and that the picker takes several databases as chips while the restore target stays single-select. The connection dialog gets its own run through: **+** opens empty even with a connection selected and adds a second rather than renaming it, a duplicate name is refused, the row's pencil opens the dialog filled in and renames in place, and a production connection forces the confirmation even in the safe mode. |
+| `npm run test:e2e` | Fills in the actual form fields and clicks the actual buttons, then verifies the data landed in MongoDB. Covers the gate opening on connect, the sidebar connecting on one click, a chosen database auto-loading its collections, per-collection progress reaching completion, a dry run reporting the target's real counts and writing nothing, a multi-database run producing one folder with a subfolder each — including expanding one database group, unticking a collection in it, checking only that collection list reached disk, and that History then lists the run as two databases and shows only the collections that were actually taken — and both runs landing in History with the host but no connection string — checked against the file on disk. It also proves the indicator is honest: it connects through a TCP proxy, cuts it, and asserts the dot turns red and the app returns to the gate. |
 
 The UI suites run against a throwaway Electron profile, so they never touch your
 saved connections, preferences, or history.

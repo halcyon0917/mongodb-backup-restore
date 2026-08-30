@@ -52,7 +52,7 @@ const PROBE = `(async () => {
   const ids = [
     'winMinimize', 'winMaximize', 'winClose', 'historyCount', 'connectionList',
     'connectionAdd', 'connectionDialog', 'connectionName', 'connectionUri',
-    'connectionDatabase', 'connectionProduction', 'connectionStatus', 'connectionSave',
+    'connectionProduction', 'connectionStatus', 'connectionSave',
     'connectionTest', 'connectionDelete', 'connectionCancel',
     'themeDark', 'themeLight', 'appVersion', 'flowStrip',
     'backupUri', 'backupDatabase', 'backupOutput', 'backupResolved', 'backupGzip',
@@ -62,6 +62,7 @@ const PROBE = `(async () => {
     'actionBar', 'actionPrimary', 'actionSecondary', 'actionTitle', 'actionDetail',
     'actionProgress', 'logDock', 'logToggle', 'log', 'logTail',
     'historyList', 'historySummary', 'historyClear', 'aboutDialog',
+    'connectList', 'connectAdd', 'connectNote', 'backupDatabaseField', 'backupDatabaseChips',
   ];
   return {
     hasApi: typeof window.api === 'object' && window.api !== null,
@@ -69,6 +70,13 @@ const PROBE = `(async () => {
     missingIds: ids.filter((id) => !document.getElementById(id)),
     navCount: document.querySelectorAll('.nav').length,
     activeView: (document.querySelector('.view.is-active') || {}).id || null,
+    gatedNavs: [...document.querySelectorAll('.nav')]
+      .filter((nav) => nav.disabled)
+      .map((nav) => nav.dataset.view),
+    actionBarHidden: document.getElementById('actionBar').classList.contains('hidden'),
+    connectEmpty: document.getElementById('connectList').textContent.trim(),
+    databasePlaceholder: document.getElementById('backupDatabase').placeholder,
+    collectionsHelp: document.getElementById('backupCollections').textContent.trim(),
     restoreModes: [...document.querySelectorAll('input[name="restoreMode"]')].map((el) => el.value),
     logLines: document.querySelectorAll('#log .log-line').length,
     versionPill: document.getElementById('appVersion').textContent,
@@ -152,10 +160,32 @@ app.whenReady().then(async () => {
       probe.missingIds.length === 0,
       `missing: ${probe.missingIds.join(', ')}`
     );
+    // Nothing that needs a server may be reachable before there is one.
     check(
-      'three views render, Back up active',
-      probe.navCount === 3 && probe.activeView === 'view-backup',
+      'the app opens on the connection gate, not on a form it cannot run',
+      probe.navCount === 3 && probe.activeView === 'view-connect',
       `navs=${probe.navCount} active=${probe.activeView}`
+    );
+    check(
+      'Back up and Restore are held back, History is not',
+      JSON.stringify(probe.gatedNavs.sort()) === JSON.stringify(['backup', 'restore']),
+      probe.gatedNavs.join(', ')
+    );
+    check('the gate hides the action bar', probe.actionBarHidden === true);
+    check(
+      'with nothing saved, the gate says how to start',
+      /Add one to get started|encryption is unavailable/.test(probe.connectEmpty),
+      probe.connectEmpty.slice(0, 80)
+    );
+    check(
+      'no database is chosen for you',
+      probe.databasePlaceholder === 'Select database',
+      probe.databasePlaceholder
+    );
+    check(
+      'the Collections card says why it is empty',
+      /No database selected yet/.test(probe.collectionsHelp),
+      probe.collectionsHelp.slice(0, 80)
     );
     check(
       'all four restore modes render',
@@ -163,11 +193,6 @@ app.whenReady().then(async () => {
       probe.restoreModes.join(', ')
     );
     check('renderer init() ran (log has lines)', probe.logLines > 0, `lines=${probe.logLines}`);
-    check(
-      'the action bar starts on Ready with the button held back',
-      probe.actionTitle === 'Ready to back up' && probe.primaryDisabled === true,
-      `title="${probe.actionTitle}" disabled=${probe.primaryDisabled}`
-    );
     check(
       'appInfo IPC round trip populated the version',
       /^v\d+\.\d+\.\d+$/.test(probe.versionPill),
@@ -188,8 +213,8 @@ app.whenReady().then(async () => {
       probe.backupOutput
     );
     check(
-      'the resolved path previews the folder this run would write',
-      probe.resolved.includes('MongoDB Backups') && probe.resolved.includes('<timestamp>'),
+      'the destination preview waits for a database rather than inventing one',
+      /Select a database/.test(probe.resolved),
       probe.resolved
     );
     check('page does not scroll horizontally', probe.bodyOverflows === false);
@@ -230,15 +255,31 @@ app.whenReady().then(async () => {
     check('probe executed', false, error.message);
   }
 
+  // Everything below needs a working view, which needs a connection. The
+  // connection is faked rather than made: this suite has to pass with no
+  // server, and the state it injects is the same shape the main process sends.
+  const FAKE_URI = 'mongodb://127.0.0.1:27017/';
+  // Injected, not made: this suite has to pass with no server running, and the
+  // payload is the same shape the main process pushes.
+  const CONNECT = `
+    setUri(${JSON.stringify('mongodb://127.0.0.1:27017/')}, { silent: true });
+    applyConnectionState({
+      uri: ${JSON.stringify('mongodb://127.0.0.1:27017/')},
+      status: 'connected', serverVersion: '7.0.11', topology: 'Single', error: null,
+    });
+  `;
+
+  try {
+    const opened = await run(`(() => { ${CONNECT} setView('backup'); return state.view; })()`);
+    check('a live connection opens the gate onto Back up', opened === 'backup', opened);
+  } catch (error) {
+    check('the gate could be opened for the remaining checks', false, error.message);
+  }
+
   // A server with dozens of databases must still be pickable: the native
-  // <datalist> this replaced grew past the window with no way to scroll.
-  //
-  // The window is focused first: this suite runs after three others, and a
-  // window Windows has not given the foreground to does not always dispatch
-  // the focus event that opens the picker. That is a property of the harness,
-  // not of the app — a real click always carries one.
-  window.focus();
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  // <datalist> this replaced grew past the window with no way to scroll. The
+  // backup field takes several at once, so choosing keeps the list open and
+  // what is typed stays a filter rather than becoming the answer.
   try {
     const combo = await run(
       `(() => {
@@ -246,55 +287,68 @@ app.whenReady().then(async () => {
           name: 'database-number-' + String(i).padStart(2, '0'),
           sizeOnDisk: (i + 1) * 1048576,
         }));
+        ${CONNECT}
         state.combos.backup.setItems(names);
+        clearDatabaseSelection();
+
         const input = document.getElementById('backupDatabase');
-        const previous = input.value;
-        input.value = '';
-        // blur first: focus() on an already-focused field fires no event.
         input.blur();
         input.focus();
         const popup = document.querySelector('.combo-popup:not([hidden])');
         if (!popup) {
-          return {
-            opened: false,
-            activeElement: document.activeElement && document.activeElement.id,
-            documentHasFocus: document.hasFocus(),
-            items: state.combos.backup.count,
-          };
+          return { opened: false, activeElement: document.activeElement && document.activeElement.id };
         }
+        const realOptions = () =>
+          document.querySelectorAll('.combo-popup:not([hidden]) .combo-option[data-name]').length;
+
         const rect = popup.getBoundingClientRect();
         const result = {
           opened: true,
-          options: popup.querySelectorAll('.combo-option').length,
+          options: realOptions(),
           clientHeight: Math.round(popup.clientHeight),
           scrollHeight: Math.round(popup.scrollHeight),
           insideViewport: rect.top >= 0 && rect.bottom <= window.innerHeight + 1,
         };
         popup.scrollTop = 99999;
         result.scrolled = popup.scrollTop > 0;
+
         input.value = 'number-3';
         input.dispatchEvent(new Event('input'));
-        result.filtered = document.querySelectorAll(
-          '.combo-popup:not([hidden]) .combo-option'
-        ).length;
+        result.filtered = realOptions();
 
-        // With a database committed, reopening must show every database again
-        // rather than filtering the list down to the chosen name alone.
-        input.value = 'database-number-07';
-        input.blur();
-        input.focus();
-        const reopened = document.querySelector('.combo-popup:not([hidden])');
-        result.afterChoosing = reopened.querySelectorAll('.combo-option').length;
-        const chosen = reopened.querySelector('.combo-option.is-chosen');
-        result.chosenMarked = Boolean(chosen) && chosen.textContent.includes('database-number-07');
-        result.chosenIsActive = Boolean(chosen) && chosen.classList.contains('is-active');
+        // Choosing one keeps the list open, so several can be picked in a row.
+        const pick = (name) => {
+          const option = [...document.querySelectorAll('.combo-popup .combo-option[data-name]')]
+            .find((el) => el.dataset.name === name);
+          option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        };
+        pick('database-number-30');
+        result.afterFirstPick = {
+          selected: [...state.selectedDatabases],
+          stillOpen: Boolean(document.querySelector('.combo-popup:not([hidden])')),
+          chips: [...document.querySelectorAll('.chip-name')].map((el) => el.textContent),
+          ticked: Boolean(
+            document.querySelector('.combo-popup .combo-option[data-name="database-number-30"].is-chosen')
+          ),
+        };
 
-        // Typing again must still narrow the list.
+        pick('database-number-31');
+        result.afterSecondPick = [...state.selectedDatabases];
+
+        // Clicking a chosen one again takes it off.
+        pick('database-number-30');
+        result.afterUnpick = [...state.selectedDatabases];
+
+        // A name the server did not list is still offerable.
+        input.value = 'not-in-the-list';
         input.dispatchEvent(new Event('input'));
-        result.searchStillWorks = reopened.querySelectorAll('.combo-option').length;
+        result.customOffered = Boolean(document.querySelector('.combo-popup .combo-option[data-custom]'));
+        document
+          .querySelector('.combo-popup .combo-option[data-custom]')
+          .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        result.afterCustom = [...state.selectedDatabases];
 
-        input.value = previous;
-        input.dispatchEvent(new Event('input'));
+        clearDatabaseSelection();
         input.blur();
         return result;
       })()`
@@ -313,22 +367,86 @@ app.whenReady().then(async () => {
       `got ${combo.filtered}`
     );
     check(
-      'reopening with a database chosen still lists all 45',
-      combo.afterChoosing === 45,
-      `got ${combo.afterChoosing}`
+      'choosing one adds a chip, ticks it, and leaves the list open',
+      combo.afterFirstPick.stillOpen === true &&
+        combo.afterFirstPick.ticked === true &&
+        JSON.stringify(combo.afterFirstPick.selected) === JSON.stringify(['database-number-30']) &&
+        JSON.stringify(combo.afterFirstPick.chips) === JSON.stringify(['database-number-30']),
+      JSON.stringify(combo.afterFirstPick)
     );
     check(
-      'the chosen database is ticked and pre-selected in the list',
-      combo.chosenMarked === true && combo.chosenIsActive === true,
-      `marked=${combo.chosenMarked} active=${combo.chosenIsActive}`
+      'a second database can be added to the same run',
+      JSON.stringify(combo.afterSecondPick) ===
+        JSON.stringify(['database-number-30', 'database-number-31']),
+      JSON.stringify(combo.afterSecondPick)
     );
     check(
-      'typing after choosing still searches (45 -> 1)',
-      combo.searchStillWorks === 1,
-      `got ${combo.searchStillWorks}`
+      'clicking a chosen database again removes it',
+      JSON.stringify(combo.afterUnpick) === JSON.stringify(['database-number-31']),
+      JSON.stringify(combo.afterUnpick)
+    );
+    check(
+      'a database the server did not list can still be named',
+      combo.customOffered === true && combo.afterCustom.includes('not-in-the-list'),
+      JSON.stringify(combo.afterCustom)
     );
   } catch (error) {
     check('database picker probe ran', false, error.message);
+  }
+
+  // The restore target is still one database typed freely, so it keeps the
+  // single-select behaviour: browsing shows everything, typing narrows.
+  try {
+    const single = await run(
+      `(() => {
+        const names = Array.from({ length: 45 }, (_, i) => ({
+          name: 'database-number-' + String(i).padStart(2, '0'),
+        }));
+        ${CONNECT}
+        state.combos.restore.setItems(names);
+        // The field is in the Restore view, and a hidden element cannot take
+        // focus, so the picker would never open.
+        setView('restore');
+        const input = document.getElementById('restoreTargetDatabase');
+        const previous = input.value;
+        const count = () =>
+          document.querySelectorAll('.combo-popup:not([hidden]) .combo-option[data-name]').length;
+
+        input.value = 'database-number-07';
+        input.blur();
+        input.focus();
+        const all = count();
+        const chosen = document.querySelector('.combo-popup:not([hidden]) .combo-option.is-chosen');
+        const marked = Boolean(chosen) && chosen.dataset.name === 'database-number-07';
+        const active = Boolean(chosen) && chosen.classList.contains('is-active');
+
+        input.dispatchEvent(new Event('input'));
+        const narrowed = count();
+
+        input.value = previous;
+        input.blur();
+        setView('backup');
+        return { all, marked, active, narrowed };
+      })()`
+    );
+
+    check(
+      'the restore target lists every database even with one chosen',
+      single.all === 45,
+      `got ${single.all}`
+    );
+    check(
+      'the chosen target is ticked and pre-selected in the list',
+      single.marked === true && single.active === true,
+      `marked=${single.marked} active=${single.active}`
+    );
+    check(
+      'typing in the restore target still searches (45 -> 1)',
+      single.narrowed === 1,
+      `got ${single.narrowed}`
+    );
+  } catch (error) {
+    check('restore target picker probe ran', false, error.message);
   }
 
   // Clicking the version opens About, and it must carry the attribution.
@@ -369,6 +487,7 @@ app.whenReady().then(async () => {
   try {
     const layout = await run(
       `(() => {
+        ${CONNECT}
         const read = (viewId) => {
           const view = document.getElementById(viewId);
           const wasActive = view.classList.contains('is-active');
@@ -387,6 +506,7 @@ app.whenReady().then(async () => {
           return out;
         };
 
+        ${CONNECT}
         const views = document.querySelector('.views');
         const bar = document.getElementById('actionBar');
         const dock = document.getElementById('logDock');
@@ -480,6 +600,7 @@ app.whenReady().then(async () => {
   try {
     const modes = await run(
       `(() => {
+        ${CONNECT}
         const accentOf = (el) => getComputedStyle(el).getPropertyValue('--mode').trim();
         const backup = document.getElementById('view-backup');
         const restore = document.getElementById('view-restore');
@@ -498,8 +619,8 @@ app.whenReady().then(async () => {
           databases: [{ name: 'demo', path: 'C:\\\\demo', collections: [{ name: 'alpha', documents: 5, bytes: 100 }] }],
         };
         document.getElementById('restoreSource').value = 'C:\\\\demo';
-        document.getElementById('restoreUri').value = 'mongodb://127.0.0.1:27017';
-        document.getElementById('backupUri').value = 'mongodb://127.0.0.1:27017';
+        // The live connection is kept: pointing at a URI that is not
+        // connected would close the gate and hide the view under test.
         renderInspection();
 
         const escalation = {};
@@ -686,11 +807,49 @@ app.whenReady().then(async () => {
         document.querySelector('.run-head').click();
         const expanded = document.querySelectorAll('.run-row').length;
         const text = document.querySelector('.run').textContent.replace(/\\s+/g, ' ');
+        // The same run, but over several databases: History has to describe it
+        // the way the form did rather than naming one and listing the rest.
+        state.history = [{
+          id: 'multi-run', kind: 'backup', status: 'done', database: '',
+          host: '127.0.0.1:27017', detail: '', folder: 'C:\\\\demo',
+          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+          durationMs: 900, error: '',
+          totals: { databases: 2, collections: 3, documents: 9, bytes: 300 },
+          collections: [],
+          databases: [
+            { name: 'shop', status: 'done', totals: { collections: 2, documents: 7, bytes: 200 },
+              collections: [
+                { name: 'orders', documents: 5, bytes: 150, indexes: 1, status: 'done' },
+                { name: 'users', documents: 2, bytes: 50, indexes: 0, status: 'done' } ] },
+            { name: 'billing', status: 'done', totals: { collections: 1, documents: 2, bytes: 100 },
+              collections: [
+                { name: 'invoices', documents: 2, bytes: 100, indexes: 0, status: 'done' } ] },
+          ],
+        }];
+        state.openRun = 'multi-run';
+        renderHistory();
+        const multi = {
+          db: document.querySelector('.run-db').textContent,
+          detail: document.querySelector('.run-detail').textContent,
+          groups: [...document.querySelectorAll('.run-group')].map((el) => ({
+            name: el.querySelector('.name').textContent,
+            open: el.classList.contains('is-open'),
+            nested: el.querySelectorAll('.run-row').length,
+          })),
+        };
+        document.querySelectorAll('.run-group-head')[0].click();
+        multi.afterOpen = [...document.querySelectorAll('.run-group')[0].querySelectorAll('.run-row .name')]
+          .map((el) => el.textContent);
+        // Collapsing the run must not leave its databases open underneath.
+        document.querySelector('.run-head').click();
+        multi.forgotten = state.openRunDatabases.size;
+
         state.history = [];
         state.openRun = null;
+        state.openRunDatabases.clear();
         renderHistory();
         setView('backup');
-        return { barHidden, emptyText, rows, collapsed, expanded, text };
+        return { barHidden, emptyText, rows, collapsed, expanded, text, multi };
       })()`
     );
 
@@ -710,6 +869,29 @@ app.whenReady().then(async () => {
       'the row names the database, the host and the outcome',
       /demo/.test(history.text) && /127\.0\.0\.1/.test(history.text) && /Done/.test(history.text),
       history.text.slice(0, 120)
+    );
+    check(
+      'a multi-database run counts its databases and names them in the detail',
+      history.multi.db === '2 databases' &&
+        /shop/.test(history.multi.detail) &&
+        /billing/.test(history.multi.detail),
+      JSON.stringify({ db: history.multi.db, detail: history.multi.detail })
+    );
+    check(
+      'it opens onto a collapsed row per database, not a flat collection list',
+      history.multi.groups.length === 2 &&
+        history.multi.groups.every((group) => !group.open && group.nested === 0),
+      JSON.stringify(history.multi.groups)
+    );
+    check(
+      'opening one database shows that database\'s collections',
+      JSON.stringify(history.multi.afterOpen) === JSON.stringify(['orders', 'users']),
+      JSON.stringify(history.multi.afterOpen)
+    );
+    check(
+      'collapsing the run forgets which of its databases were open',
+      history.multi.forgotten === 0,
+      `${history.multi.forgotten} left open`
     );
   } catch (error) {
     check('history probe ran', false, error.message);
@@ -798,6 +980,10 @@ app.whenReady().then(async () => {
         // A connection marked production forces the in-form confirmation even
         // in the safe restore mode.
         setUri('mongodb://127.0.0.1:27017/?beta=1', { silent: true });
+        applyConnectionState({
+          uri: 'mongodb://127.0.0.1:27017/?beta=1',
+          status: 'connected', serverVersion: '7.0.11', topology: 'Single', error: null,
+        });
         setView('restore');
         const keep = document.querySelector('input[name=\"restoreMode\"][value=\"keep\"]');
         keep.checked = true;
@@ -811,6 +997,10 @@ app.whenReady().then(async () => {
 
         // And not for an ordinary one.
         setUri('mongodb://127.0.0.1:27017/?alpha=1', { silent: true });
+        applyConnectionState({
+          uri: 'mongodb://127.0.0.1:27017/?alpha=1',
+          status: 'connected', serverVersion: '7.0.11', topology: 'Single', error: null,
+        });
         keep.dispatchEvent(new Event('change'));
         out.ordinary = {
           detected: isProductionConnection(),
