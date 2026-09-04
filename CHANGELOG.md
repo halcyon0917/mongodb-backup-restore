@@ -17,6 +17,32 @@ from the user's point of view:
 
 Nothing yet.
 
+## [2.1.1] — 2026-09-01
+
+Things that only show up once you select a lot of databases at once.
+
+### Added
+
+- **Select all / clear inside the database list**, with the count of what is
+  selected. Scoped to whatever the filter is showing, so typing a term and
+  pressing *Select these 15* is how a related group goes in at once — the
+  buttons name their scope rather than leaving you to guess it.
+
+### Fixed
+
+- The database list was sized from the typing box rather than from the field it
+  belongs to. As chips filled the field that box shrank to its minimum, so the
+  list collapsed to a narrow column pushed against the right-hand edge — with
+  long database names, unreadable exactly when there were most of them to read.
+  It now matches the field's width and left edge.
+- Selecting many databases filled the field with chips and pushed the rest of
+  the form down. The first three are shown and the rest are counted — *3
+  more* — which names them on hover and opens the list, where they can be seen
+  in full and unticked. A single chip can also no longer take a whole row.
+- Ticking a database scrolled the list back to the top, because choosing one
+  rebuilds it. Unusable with forty databases; the list now stays where it was.
+
+
 ## [2.1.0] — 2026-08-30
 
 Connections are now real: held open for the session, and reported honestly. And
@@ -216,7 +242,8 @@ First release.
 - One database per run; whole-cluster backup is not implemented.
 - The executables are unsigned, so Windows SmartScreen warns on first run.
 
-[Unreleased]: https://github.com/halcyon0917/mongodb-backup-restore/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/halcyon0917/mongodb-backup-restore/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/halcyon0917/mongodb-backup-restore/releases/tag/v2.1.1
 [2.1.0]: https://github.com/halcyon0917/mongodb-backup-restore/releases/tag/v2.1.0
 [2.0.0]: https://github.com/halcyon0917/mongodb-backup-restore/releases/tag/v2.0.0
 [1.0.0]: https://github.com/halcyon0917/mongodb-backup-restore/releases/tag/v1.0.0

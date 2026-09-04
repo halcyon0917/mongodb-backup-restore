@@ -348,6 +348,95 @@ app.whenReady().then(async () => {
           .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
         result.afterCustom = [...state.selectedDatabases];
 
+        // A long selection must not turn the field into a wall, and the list
+        // must stay as wide as the field rather than as wide as whatever room
+        // the chips left the typing box.
+        clearDatabaseSelection();
+        state.selectedDatabases = names.slice(0, 8).map((entry) => entry.name);
+        onDatabaseSelectionChanged();
+        input.blur();
+        input.focus();
+
+        const field = document.getElementById('backupDatabaseField');
+        const fieldRect = field.getBoundingClientRect();
+        const openPopup = document.querySelector('.combo-popup:not([hidden])');
+        const popupRect = openPopup.getBoundingClientRect();
+        result.many = {
+          selected: state.selectedDatabases.length,
+          chips: [...document.querySelectorAll('.chip:not(.chip-more)')].length,
+          more: (document.querySelector('.chip-more') || {}).textContent || '',
+          moreTitleLists: (document.querySelector('.chip-more') || {}).title || '',
+          fieldWidth: Math.round(fieldRect.width),
+          popupWidth: Math.round(popupRect.width),
+          inputWidth: Math.round(input.getBoundingClientRect().width),
+          alignedLeft: Math.abs(popupRect.left - fieldRect.left) <= 1,
+        };
+
+        // The count opens the list, which is where the hidden ones are changed.
+        input.blur();
+        document.querySelector('.chip-more').click();
+        result.moreOpensList = Boolean(document.querySelector('.combo-popup:not([hidden])'));
+
+        // Bulk actions: ticking forty databases one at a time is the thing
+        // this exists to avoid.
+        clearDatabaseSelection();
+        input.blur();
+        input.focus();
+        const bulk = () => document.querySelector('.combo-actions');
+        const buttons = () => [...bulk().querySelectorAll('.link')];
+
+        result.bulkIdle = {
+          selectAll: buttons()[0].textContent,
+          clear: buttons()[1].textContent,
+          clearDisabled: buttons()[1].disabled,
+          count: bulk().querySelector('.combo-count').textContent,
+        };
+
+        const press = (index) =>
+          buttons()[index].dispatchEvent(
+            new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+          );
+
+        press(0);
+        result.afterSelectAll = {
+          selected: state.selectedDatabases.length,
+          selectAllDisabled: buttons()[0].disabled,
+          count: bulk().querySelector('.combo-count').textContent,
+        };
+
+        // Filtered, the actions apply to what is shown, and say so.
+        input.value = 'number-1';
+        input.dispatchEvent(new Event('input'));
+        result.bulkFiltered = {
+          selectAll: buttons()[0].textContent,
+          clear: buttons()[1].textContent,
+          count: bulk().querySelector('.combo-count').textContent,
+        };
+        press(1);
+        result.afterClearMatching = {
+          selected: state.selectedDatabases.length,
+          anyMatchingLeft: state.selectedDatabases.some((name) => name.includes('number-1')),
+        };
+
+        // Clearing everything is the whole selection, filter or not.
+        input.value = '';
+        input.dispatchEvent(new Event('input'));
+        press(1);
+        result.afterClearAll = state.selectedDatabases.length;
+
+        // A list of forty that jumps back to the top on every tick is unusable.
+        press(0);
+        const popupNow = document.querySelector('.combo-popup:not([hidden])');
+        popupNow.scrollTop = 180;
+        const scrollBefore = popupNow.scrollTop;
+        [...popupNow.querySelectorAll('.combo-option[data-name]')][12].dispatchEvent(
+          new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+        );
+        result.scroll = {
+          before: scrollBefore,
+          after: document.querySelector('.combo-popup:not([hidden])').scrollTop,
+        };
+
         clearDatabaseSelection();
         input.blur();
         return result;
@@ -389,6 +478,65 @@ app.whenReady().then(async () => {
       'a database the server did not list can still be named',
       combo.customOffered === true && combo.afterCustom.includes('not-in-the-list'),
       JSON.stringify(combo.afterCustom)
+    );
+    check(
+      'a long selection shows a few chips and counts the rest',
+      combo.many.selected === 8 && combo.many.chips === 3 && combo.many.more === '5 more',
+      JSON.stringify(combo.many)
+    );
+    check(
+      'the count names the databases it stands for',
+      combo.many.moreTitleLists.split('\n').length === 6,
+      combo.many.moreTitleLists.replace(/\n/g, ' | ')
+    );
+    check(
+      'clicking the count opens the list, where they can be unticked',
+      combo.moreOpensList === true
+    );
+    check(
+      'the list offers select-all and clear, and says how many are selected',
+      combo.bulkIdle.selectAll === 'Select all 45' &&
+        combo.bulkIdle.clear === 'Clear all' &&
+        combo.bulkIdle.clearDisabled === true &&
+        combo.bulkIdle.count === '0 selected',
+      JSON.stringify(combo.bulkIdle)
+    );
+    check(
+      'select-all takes the whole list in one go',
+      combo.afterSelectAll.selected === 45 &&
+        combo.afterSelectAll.selectAllDisabled === true &&
+        combo.afterSelectAll.count === '45 selected',
+      JSON.stringify(combo.afterSelectAll)
+    );
+    check(
+      'with a filter the actions name what they apply to',
+      combo.bulkFiltered.selectAll === 'Select these 10' &&
+        combo.bulkFiltered.clear === 'Clear these 10' &&
+        /45 selected · 10 of 45 shown/.test(combo.bulkFiltered.count),
+      JSON.stringify(combo.bulkFiltered)
+    );
+    check(
+      'clearing while filtered drops only the matches',
+      combo.afterClearMatching.selected === 35 &&
+        combo.afterClearMatching.anyMatchingLeft === false,
+      JSON.stringify(combo.afterClearMatching)
+    );
+    check(
+      'clearing with no filter drops the whole selection',
+      combo.afterClearAll === 0,
+      `${combo.afterClearAll} left`
+    );
+    check(
+      'the list stays where it was scrolled to when a database is ticked',
+      combo.scroll.before === 180 && combo.scroll.after === 180,
+      JSON.stringify(combo.scroll)
+    );
+    check(
+      'the list is as wide as the field, not as wide as the typing box',
+      combo.many.popupWidth === combo.many.fieldWidth &&
+        combo.many.popupWidth > combo.many.inputWidth &&
+        combo.many.alignedLeft,
+      JSON.stringify(combo.many)
     );
   } catch (error) {
     check('database picker probe ran', false, error.message);

@@ -1147,12 +1147,48 @@ input[type='radio']:checked::after {
 .combo-popup {
   position: fixed;
   z-index: 60;
+  min-width: 240px;
   padding: 5px;
   background: var(--bg-3);
   border: 1px solid var(--line-2);
   border-radius: 9px;
   box-shadow: var(--shadow);
   overflow-y: auto;
+}
+
+/* Sticky, so the bulk actions stay reachable however far the list is
+   scrolled. The negative margins cancel the popup's own padding. */
+.combo-actions {
+  position: sticky;
+  top: -5px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -5px -5px 4px;
+  padding: 9px 10px;
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.combo-actions .link:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.combo-actions .link:disabled:hover {
+  color: var(--accent);
+}
+
+.combo-actions .link.dim:disabled:hover {
+  color: var(--text-3);
+}
+
+.combo-count {
+  font-family: 'Space Mono', 'Cascadia Mono', Consolas, monospace;
+  font-size: 10px;
+  color: var(--text-3);
+  white-space: nowrap;
 }
 
 .combo-option {
@@ -1525,7 +1561,28 @@ input[type='radio']:checked::after {
   font-family: 'Space Mono', 'Cascadia Mono', Consolas, monospace;
   font-size: 11.5px;
   color: var(--text);
-  max-width: 100%;
+  /* Long database names are common; one must not take the whole row. */
+  max-width: 190px;
+}
+
+/* Stands for the databases beyond the first few. Clicking opens the list,
+   which is where they can be read in full and unticked. */
+.chip-more {
+  padding: 0 9px;
+  border: 0;
+  font: inherit;
+  font-family: Manrope, system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-2);
+  background: var(--bg-4);
+  box-shadow: inset 0 0 0 1px var(--line-2);
+  cursor: pointer;
+}
+
+.chip-more:hover {
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
 }
 
 .chip-name {

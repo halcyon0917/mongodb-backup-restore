@@ -222,7 +222,11 @@ Delete that file to reset the app.
    databases stay navigable — and clicking one adds it as a chip without closing
    the list, so several can go into one run. A name the server will not list can
    still be typed and used, which matters for accounts that can read a database
-   but not enumerate them.
+   but not enumerate them. The list carries **select all** and **clear**, scoped
+   to whatever the filter is showing — type a term and take that whole group in
+   one press. The field shows the first three and counts the rest, so selecting
+   twenty does not bury the form; the count opens the list, where any of them
+   can be unticked.
 3. Choose where to save it. The card shows the exact folder this run will
    create, so a backup never overwrites an earlier one.
 4. **Start backup.**

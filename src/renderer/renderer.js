@@ -719,7 +719,14 @@ function savePrefs(partial) {
  *
  * The input stays free text — a name that is not in the list is still valid.
  */
-function createCombobox(input, { emptyLabel = 'No matching database', multiple = false, onChange = null } = {}) {
+function createCombobox(
+  input,
+  { emptyLabel = 'No matching database', multiple = false, onChange = null, anchor = null } = {}
+) {
+  // What the popup lines up with. In the multi-select field the typing box is a
+  // narrow remnant beside the chips, so measuring it would size the list to
+  // whatever room the chips happened to leave.
+  const frame = anchor || input;
   const popup = el('div', 'combo-popup');
   popup.setAttribute('role', 'listbox');
   popup.hidden = true;
@@ -746,7 +753,7 @@ function createCombobox(input, { emptyLabel = 'No matching database', multiple =
   const chosenNames = () => (multiple ? state.selectedDatabases : [input.value.trim()]);
 
   function position() {
-    const rect = input.getBoundingClientRect();
+    const rect = frame.getBoundingClientRect();
     popup.style.left = `${Math.round(rect.left)}px`;
     popup.style.width = `${Math.round(rect.width)}px`;
 
@@ -784,12 +791,75 @@ function createCombobox(input, { emptyLabel = 'No matching database', multiple =
     popup.appendChild(custom);
   }
 
+  /**
+   * Select or clear everything the filter is currently showing.
+   *
+   * Scoped to the matches rather than the whole list, so typing a term and
+   * pressing Select all is how you take a related group in one go — which is
+   * the thing that is unbearable to do one tick at a time.
+   */
+  function appendBulkActions() {
+    if (!multiple || items.length === 0) return;
+
+    const chosen = new Set(state.selectedDatabases);
+    const filtered = matches.length !== items.length;
+    const missing = matches.filter((item) => !chosen.has(item.name));
+    const present = matches.filter((item) => chosen.has(item.name));
+
+    const selectAll = el(
+      'button',
+      'link',
+      filtered ? `Select these ${matches.length}` : `Select all ${items.length}`
+    );
+    selectAll.type = 'button';
+    selectAll.disabled = missing.length === 0;
+    selectAll.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      for (const item of missing) state.selectedDatabases.push(item.name);
+      if (onChange) onChange();
+      applyFilter();
+      render();
+    });
+
+    // Unfiltered, "clear" means the whole selection — including any name typed
+    // in by hand that the server never listed.
+    const clear = el('button', 'link dim', filtered ? `Clear these ${present.length}` : 'Clear all');
+    clear.type = 'button';
+    clear.disabled = filtered ? present.length === 0 : state.selectedDatabases.length === 0;
+    clear.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      if (filtered) {
+        const drop = new Set(present.map((item) => item.name));
+        state.selectedDatabases = state.selectedDatabases.filter((name) => !drop.has(name));
+      } else {
+        state.selectedDatabases = [];
+      }
+      if (onChange) onChange();
+      applyFilter();
+      render();
+    });
+
+    const count = el(
+      'span',
+      'combo-count',
+      `${state.selectedDatabases.length} selected` +
+        (filtered ? ` · ${matches.length} of ${items.length} shown` : '')
+    );
+
+    popup.appendChild(el('div', 'combo-actions', selectAll, clear, el('span', 'spacer'), count));
+  }
+
   function render() {
+    // Ticking rebuilds the list, and a list of forty databases that jumps back
+    // to the top on every tick is unusable.
+    const scrollTop = popup.scrollTop;
     popup.textContent = '';
+    appendBulkActions();
 
     if (matches.length === 0) {
       popup.appendChild(el('div', 'combo-empty', emptyLabel));
       appendCustomOption();
+      popup.scrollTop = scrollTop;
       return;
     }
 
@@ -823,6 +893,7 @@ function createCombobox(input, { emptyLabel = 'No matching database', multiple =
     });
 
     appendCustomOption();
+    popup.scrollTop = scrollTop;
   }
 
   function applyFilter() {
@@ -937,7 +1008,7 @@ function createCombobox(input, { emptyLabel = 'No matching database', multiple =
   // the capture phase to catch scroll from whichever element actually moved.
   const reposition = () => {
     if (!isOpen) return;
-    const rect = input.getBoundingClientRect();
+    const rect = frame.getBoundingClientRect();
     if (rect.bottom < 0 || rect.top > window.innerHeight) close();
     else position();
   };
@@ -1069,12 +1140,24 @@ function clearDatabaseSelection() {
   refreshDatabaseChips();
 }
 
-/** The chips inside the Databases field, one per chosen database. */
+/**
+ * How many chips are worth showing before the field becomes the problem.
+ *
+ * Selecting forty databases is a reasonable thing to do, and forty chips turn
+ * the field into a wall that pushes the rest of the form off screen.
+ */
+const MAX_VISIBLE_CHIPS = 3;
+
+/** The chips inside the Databases field: the first few, then a count. */
 function refreshDatabaseChips() {
   const chips = $('backupDatabaseChips');
   chips.textContent = '';
 
-  for (const name of state.selectedDatabases) {
+  const names = state.selectedDatabases;
+  const visible = names.slice(0, MAX_VISIBLE_CHIPS);
+  const hidden = names.slice(MAX_VISIBLE_CHIPS);
+
+  for (const name of visible) {
     const remove = el('button', 'chip-remove', '×');
     remove.type = 'button';
     remove.title = `Remove ${name}`;
@@ -1085,13 +1168,28 @@ function refreshDatabaseChips() {
       state.selectedDatabases = state.selectedDatabases.filter((entry) => entry !== name);
       onDatabaseSelectionChanged();
     });
-    chips.appendChild(el('span', 'chip', el('span', 'chip-name', name), remove));
+    const chip = el('span', 'chip', el('span', 'chip-name', name), remove);
+    chip.title = name;
+    chips.appendChild(chip);
+  }
+
+  if (hidden.length > 0) {
+    // The rest are unticked in the list, which is where they can be seen in
+    // full anyway — so this opens it rather than carrying its own remove.
+    const more = el('button', 'chip chip-more', `${hidden.length} more`);
+    more.type = 'button';
+    more.title = `Also selected:\n${hidden.join('\n')}`;
+    more.setAttribute('aria-label', `${hidden.length} more selected. Open the list to change them.`);
+    more.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (state.combos.backup) state.combos.backup.toggle();
+    });
+    chips.appendChild(more);
   }
 
   // The placeholder is the instruction, so it only belongs on an empty field.
-  $('backupDatabase').placeholder = state.selectedDatabases.length
-    ? 'Add another…'
-    : 'Select database';
+  $('backupDatabase').placeholder = names.length ? 'Add another…' : 'Select database';
 }
 
 function onDatabaseSelectionChanged() {
@@ -2724,6 +2822,7 @@ async function init() {
   state.combos.backup = createCombobox($('backupDatabase'), {
     multiple: true,
     onChange: onDatabaseSelectionChanged,
+    anchor: $('backupDatabaseField'),
   });
   state.combos.restore = createCombobox($('restoreTargetDatabase'));
   refreshDatabaseChips();
